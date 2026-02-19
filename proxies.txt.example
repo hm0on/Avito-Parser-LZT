@@ -1,0 +1,12 @@
+# Прокси-лист — по одному на строку.
+# Поддерживаемые форматы:
+#   http://user:pass@host:port
+#   socks5://user:pass@host:port
+#   host:port          (будет добавлен http://)
+#
+# Строки начинающиеся с # — комментарии, игнорируются.
+# Пустые строки игнорируются.
+
+http://user1:pass1@proxy1.example.com:10000
+http://user2:pass2@proxy2.example.com:10000
+http://user3:pass3@proxy3.example.com:10000

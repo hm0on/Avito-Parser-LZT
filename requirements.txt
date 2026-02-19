@@ -1,0 +1,49 @@
+# Web framework
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+
+# Database
+sqlalchemy==2.0.36
+asyncpg==0.30.0
+alembic==1.14.0
+
+# Settings
+pydantic-settings==2.6.1
+pydantic[email]==2.10.3
+
+# HTTP clients
+httpx==0.28.0
+aiohttp==3.11.9
+
+# Playwright (browser automation)
+playwright==1.49.0
+playwright-stealth==1.0.6
+
+# Phone normalization
+phonenumbers==8.13.50
+
+# Fuzzy matching (deduplication)
+rapidfuzz==3.10.1
+
+# AI / OpenAI
+openai==1.57.2
+
+# Scheduler
+apscheduler==3.10.4
+
+# CSV export
+pandas==2.2.3
+
+# Logging
+structlog==24.4.0
+
+# Async utilities
+tenacity==9.0.0
+
+# Data utilities
+python-dateutil==2.9.0.post0
+
+# Stage 2 Review Enrichment — HTML parsing + search
+beautifulsoup4==4.12.3
+lxml==5.3.0
+duckduckgo-search==6.3.7
