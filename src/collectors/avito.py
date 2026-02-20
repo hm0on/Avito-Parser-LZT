@@ -197,32 +197,49 @@ class AvitoCollector(AbstractCollector):
         log.info("avito.collect.done", keyword=keyword, count=len(companies))
         return companies
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=4, max=15))
     async def _fetch(self, url: str) -> str | None:
-        proxy_url = proxy_manager.get_next()
-        cookies = self._cookies_provider.get() if self._cookies_provider else {}
+        """Fetch with up to 3 retries; on 429 renews cookies and waits before retry."""
+        for attempt in range(1, 4):
+            proxy_url = proxy_manager.get_next()
+            cookies = self._cookies_provider.get() if self._cookies_provider else {}
 
-        try:
-            async with httpx.AsyncClient(
-                proxy=proxy_url or None,
-                headers=_HEADERS,
-                timeout=30.0,
-                follow_redirects=True,
-            ) as client:
-                resp = await client.get(url, cookies=cookies)
+            try:
+                async with httpx.AsyncClient(
+                    proxy=proxy_url or None,
+                    headers=_HEADERS,
+                    timeout=30.0,
+                    follow_redirects=True,
+                ) as client:
+                    resp = await client.get(url, cookies=cookies)
 
-                if resp.status_code in (403, 429):
-                    log.warning("avito.fetch.blocked", status=resp.status_code, url=url)
-                    if self._cookies_provider:
-                        self._cookies_provider.handle_block()
-                    return None
+                    if resp.status_code == 429:
+                        wait = 5 * attempt
+                        log.warning("avito.fetch.rate_limited",
+                                    attempt=attempt, wait_s=wait, url=url)
+                        if self._cookies_provider:
+                            self._cookies_provider.handle_block()
+                        await asyncio.sleep(wait)
+                        continue
 
-                resp.raise_for_status()
-                return resp.text
+                    if resp.status_code == 403:
+                        log.warning("avito.fetch.forbidden", url=url)
+                        if self._cookies_provider:
+                            self._cookies_provider.handle_block()
+                        return None
 
-        except Exception as exc:
-            log.warning("avito.fetch.error", url=url, error=str(exc))
-            raise  # tenacity retries
+                    resp.raise_for_status()
+                    return resp.text
+
+            except httpx.HTTPStatusError as exc:
+                log.warning("avito.fetch.http_error", status=exc.response.status_code,
+                            attempt=attempt, url=url)
+                await asyncio.sleep(3 * attempt)
+            except Exception as exc:
+                log.warning("avito.fetch.error", error=str(exc), attempt=attempt, url=url)
+                await asyncio.sleep(3 * attempt)
+
+        log.warning("avito.fetch.gave_up", url=url)
+        return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
