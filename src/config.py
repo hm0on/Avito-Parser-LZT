@@ -14,24 +14,24 @@ class Settings(BaseSettings):
     # OpenAI
     openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
 
-    # 2GIS
-    twogis_api_key: str = Field(default="", alias="TWOGIS_API_KEY")
-
-    # DaData
+    # DaData (ФНС/ЕГРЮЛ/ЕГРИП)
     dadata_api_key: str = Field(default="", alias="DADATA_API_KEY")
     dadata_secret_key: str = Field(default="", alias="DADATA_SECRET_KEY")
-
-    # ФССП
-    fssp_api_token: str = Field(default="", alias="FSSP_API_TOKEN")
 
     # Proxy for Playwright scrapers
     # Use PROXY_FILE for multiple proxies (one per line); PROXY_URL for a single proxy.
     proxy_url: str = Field(default="", alias="PROXY_URL")
     proxy_file: str = Field(default="", alias="PROXY_FILE")
 
+    # SX.org proxy API key (stored for future wiring)
+    sx_proxy_api_key: str = Field(default="", alias="SX_PROXY_API_KEY")
+
+    # Avito cookies via spfa.ru (~12₽/set, lasts 12h) — bypass Avito firewall
+    # Register at https://spfa.ru to get a key
+    avito_cookies_api_key: str = Field(default="", alias="AVITO_COOKIES_API_KEY")
+
     # Stage 2 Review Enrichment
     serpapi_key: str = Field(default="", alias="SERPAPI_KEY")
-    vk_access_token: str = Field(default="", alias="VK_ACCESS_TOKEN")
     enable_review_enrichment: bool = Field(default=True, alias="ENABLE_REVIEW_ENRICHMENT")
 
     # Pipeline thresholds

@@ -76,12 +76,11 @@ def test_parse_ru_date_all_months():
 # ---------------------------------------------------------------------------
 
 
-@respx.mock
 async def test_parse_basic(parser, page_html):
     url = "https://otzovik.com/reviews/burpro/"
-    respx.get(url).mock(return_value=Response(200, text=page_html))
-
-    reviews = await parser.parse(url, "БурПро")
+    async with respx.mock as mock:
+        mock.get(url).mock(return_value=Response(200, text=page_html))
+        reviews = await parser.parse(url, "БурПро")
 
     assert len(reviews) == 2
     assert reviews[0].source == "otzovik"
@@ -90,23 +89,21 @@ async def test_parse_basic(parser, page_html):
     assert reviews[0].author == "ivanov_omsk"
 
 
-@respx.mock
 async def test_parse_dates_parsed(parser, page_html):
     url = "https://otzovik.com/reviews/burpro/"
-    respx.get(url).mock(return_value=Response(200, text=page_html))
-
-    reviews = await parser.parse(url, "БурПро")
+    async with respx.mock as mock:
+        mock.get(url).mock(return_value=Response(200, text=page_html))
+        reviews = await parser.parse(url, "БурПро")
 
     assert reviews[0].review_date == datetime(2026, 2, 19)
     assert reviews[1].review_date == datetime(2026, 1, 10)
 
 
-@respx.mock
 async def test_parse_source_link(parser, page_html):
     url = "https://otzovik.com/reviews/burpro/"
-    respx.get(url).mock(return_value=Response(200, text=page_html))
-
-    reviews = await parser.parse(url, "БурПро")
+    async with respx.mock as mock:
+        mock.get(url).mock(return_value=Response(200, text=page_html))
+        reviews = await parser.parse(url, "БурПро")
 
     for rv in reviews:
         assert rv.source_link == url
@@ -117,21 +114,21 @@ async def test_parse_source_link(parser, page_html):
 # ---------------------------------------------------------------------------
 
 
-@respx.mock
 async def test_parse_403_returns_empty(parser):
     url = "https://otzovik.com/reviews/burpro/"
-    respx.get(url).mock(return_value=Response(403, text="Access denied"))
+    async with respx.mock as mock:
+        mock.get(url).mock(return_value=Response(403, text="Access denied"))
+        reviews = await parser.parse(url, "БурПро")
 
-    reviews = await parser.parse(url, "БурПро")
     assert reviews == []
 
 
-@respx.mock
 async def test_parse_non_200_returns_empty(parser):
     url = "https://otzovik.com/reviews/burpro/"
-    respx.get(url).mock(return_value=Response(500, text="Server Error"))
+    async with respx.mock as mock:
+        mock.get(url).mock(return_value=Response(500, text="Server Error"))
+        reviews = await parser.parse(url, "БурПро")
 
-    reviews = await parser.parse(url, "БурПро")
     assert reviews == []
 
 
