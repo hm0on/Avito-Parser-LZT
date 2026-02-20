@@ -76,14 +76,28 @@ class PipelineRunner:
             await session.flush()
             log.info("pipeline.stage1.persisted", count=len(db_raws))
 
-            # ── Stage 2: Enrich ──────────────────────────────────────────
+            # ── Stage 2: Enrich (concurrent) ─────────────────────────────
             log.info("pipeline.stage2.enrich")
             enriched_pairs: list[tuple[CompanyRaw, CompanyEnriched]] = []
             # Map raw_id → extra reviews found by ReviewSearcher (Flamp/VK/Otzovik)
             extra_reviews_map: dict[str, list[RawReview]] = {}
 
-            for db_raw in db_raws:
-                enriched, extra_reviews = await self.enricher.enrich(db_raw)
+            enrich_sem = asyncio.Semaphore(3)
+
+            async def _enrich_one(db_raw: CompanyRaw):
+                async with enrich_sem:
+                    return db_raw, await self.enricher.enrich(db_raw)
+
+            enrich_results = await asyncio.gather(
+                *[_enrich_one(db_raw) for db_raw in db_raws],
+                return_exceptions=True,
+            )
+
+            for result in enrich_results:
+                if isinstance(result, Exception):
+                    log.error("pipeline.enrich.error", error=str(result))
+                    continue
+                db_raw, (enriched, extra_reviews) = result
                 session.add(enriched)
                 enriched_pairs.append((db_raw, enriched))
                 db_raw.is_processed = True
@@ -113,22 +127,43 @@ class PipelineRunner:
 
             # ── Stage 4 + 5: AI summarize, risk assess, write clean ──────
             log.info("pipeline.stage4.ai_and_write")
-            for card in canonical_cards:
-                # Gather reviews from Stage 1 collectors + Stage 2 enrichment
-                reviews_for_ai = _gather_reviews(card, db_id_map, extra_reviews_map)
+            ai_sem = asyncio.Semaphore(5)
 
-                summary = await self.summarizer.summarize(
-                    company_name=card.name_normalized,
-                    reviews=reviews_for_ai,
-                )
-                card.reviews_sample = reviews_for_ai[: settings.max_reviews_per_company]
+            async def _process_card(card: CanonicalCard):
+                async with ai_sem:
+                    # Gather reviews from Stage 1 collectors + Stage 2 enrichment
+                    reviews_for_ai = _gather_reviews(card, db_id_map, extra_reviews_map)
 
-                risk_level, risk_reasons = await self.risk_assessor.assess(
-                    checks=card.checks,
-                    reviews=reviews_for_ai,
-                    company_name=card.name_normalized,
-                )
+                    # Update reviews_count / average_rating from actually collected reviews
+                    # Use the larger of metadata count vs actual collected texts
+                    if reviews_for_ai:
+                        card.reviews_count = max(card.reviews_count or 0, len(reviews_for_ai))
+                        ratings = [r["rating"] for r in reviews_for_ai if r.get("rating")]
+                        if ratings:
+                            card.average_rating = round(sum(ratings) / len(ratings), 2)
 
+                    summary = await self.summarizer.summarize(
+                        company_name=card.name_normalized,
+                        reviews=reviews_for_ai,
+                    )
+                    card.reviews_sample = reviews_for_ai[: settings.max_reviews_per_company]
+
+                    risk_level, risk_reasons = await self.risk_assessor.assess(
+                        checks=card.checks,
+                        reviews=reviews_for_ai,
+                        company_name=card.name_normalized,
+                    )
+                    return card, summary, risk_level, risk_reasons
+
+            ai_results = await asyncio.gather(
+                *[_process_card(card) for card in canonical_cards],
+                return_exceptions=True,
+            )
+            for result in ai_results:
+                if isinstance(result, Exception):
+                    log.error("pipeline.ai.error", error=str(result))
+                    continue
+                card, summary, risk_level, risk_reasons = result
                 clean = _canonical_to_orm(card, summary, risk_level, risk_reasons)
                 session.add(clean)
 
@@ -149,6 +184,12 @@ class PipelineRunner:
                 )
             else:
                 all_companies.extend(result)
+
+        # Fetch phone numbers for Avito companies via spfa.ru
+        for collector in self.collectors:
+            if hasattr(collector, "enrich_phones"):
+                await collector.enrich_phones(all_companies)
+
         return all_companies
 
 

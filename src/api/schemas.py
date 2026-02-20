@@ -33,6 +33,7 @@ class CompanyListItem(BaseModel):
     inn: str | None = None
     entity_type: str | None = None
     phones: list[str] | None = None
+    addresses: list[Any] | None = None
     average_rating: float | None = None
     reviews_count: int | None = None
     risk_level: str | None = None

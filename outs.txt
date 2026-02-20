@@ -1,0 +1,191 @@
+python3 -c "
+  import asyncio
+  from src.enrichment.review_parsers.flamp import FlampParser
+
+  async def test():
+      parser = FlampParser()
+      # Реальная фирма на Flamp с отзывами
+      url = 'https://omsk.flamp.ru/firm/oblgaz_proekt_proektnaya_organizaciya-700000
+  01038189986'
+      print(f'Парсим: {url}')
+      reviews = await parser.parse(url, 'ОблГазПроект')
+      print(f'Найдено отзывов: {len(reviews)}')
+      for r in reviews[:3]:
+          print(f'  [{r.rating}] {r.author}: {(r.text or \"\")[:80]}')
+
+  asyncio.run(test())
+  "
+
+  ВЫВОД: hm0on@MacBook-Air-Denis Avito_Parser % python3 -c "       
+  import asyncio
+  from src.enrichment.review_parsers.flamp import FlampParser
+
+  async def test():
+      parser = FlampParser()
+      # Реальная фирма на Flamp с отзывами
+      url = 'https://omsk.flamp.ru/firm/oblgaz_proekt_proektnaya_organizaciya-700000 
+  01038189986'
+      print(f'Парсим: {url}')
+      reviews = await parser.parse(url, 'ОблГазПроект')
+      print(f'Найдено отзывов: {len(reviews)}')
+      for r in reviews[:3]:
+          print(f'  [{r.rating}] {r.author}: {(r.text or \"\")[:80]}')
+
+  asyncio.run(test())
+  "
+  File "<string>", line 2
+    import asyncio
+IndentationError: unexpected indent
+
+  ---
+
+  # Сначала очистим БД от старых данных
+  /opt/homebrew/opt/postgresql@16/bin/psql -U avito -d avito_parser -c "TRUNCATE
+  companies_omsk_clean, companies_enriched, reviews_raw_omsk, companies_raw_omsk
+  RESTART IDENTITY CASCADE;"
+
+  # Запуск
+  python3 run_once.py
+
+  ВЫВОД:
+
+  ---
+
+  # Список с адресами
+  curl -s "http://localhost:8000/companies" | python3 -m json.tool
+
+  # Или более читаемо
+  curl -s "http://localhost:8000/companies" | python3 -c "
+  import sys, json
+  d = json.load(sys.stdin)
+  for c in d['results']:
+      print(f\"{c['name_normalized']}\")
+      print(f\"  phones:    {c.get('phones')}\")
+      print(f\"  addresses: {c.get('addresses')}\")
+      print(f\"  rating:    {c.get('average_rating')}\")
+      print(f\"  risk:      {c.get('risk_level')}\")
+      print()
+  "
+
+ВЫВОД: {
+    "total": 5,
+    "page": 1,
+    "page_size": 20,
+    "results": [
+        {
+            "id": "b6480cbb-343f-4ab1-a2ed-86afd5e37f3f",
+            "name_normalized": "Газоснабжение под ключ",
+            "inn": null,
+            "entity_type": "unknown",
+            "phones": [
+                "+79927004215"
+            ],
+            "addresses": [
+                {
+                    "raw": "р-н Кировский· выезжает по городу",
+                    "district": "Кировский"
+                }
+            ],
+            "average_rating": null,
+            "reviews_count": null,
+            "risk_level": "yellow",
+            "merged_sources": [
+                "avito"
+            ],
+            "manual_review_required": true,
+            "last_updated": "2026-02-20T16:56:56.292142Z"
+        },
+        {
+            "id": "71b5ccc2-a6ca-44e3-8a19-f63422b8d68a",
+            "name_normalized": "Отогрев водопровода и канализации",
+            "inn": null,
+            "entity_type": "unknown",
+            "phones": [
+                "+79927000862"
+            ],
+            "addresses": [
+                {
+                    "raw": "р-н Советский· выезжает по городу",
+                    "district": "Советский"
+                }
+            ],
+            "average_rating": 4.0,
+            "reviews_count": 4,
+            "risk_level": "yellow",
+            "merged_sources": [
+                "avito"
+            ],
+            "manual_review_required": true,
+            "last_updated": "2026-02-20T16:56:56.292142Z"
+        },
+        {
+            "id": "15f5c48e-c37b-46f5-b12f-1bd02ecb1516",
+            "name_normalized": "Слесарь сантехник",
+            "inn": null,
+            "entity_type": "unknown",
+            "phones": [
+                "+79343351605"
+            ],
+            "addresses": [
+                {
+                    "raw": "р-н Советский· выезжает по районам",
+                    "district": "Советский"
+                }
+            ],
+            "average_rating": 5.0,
+            "reviews_count": 2,
+            "risk_level": "yellow",
+            "merged_sources": [
+                "avito"
+            ],
+            "manual_review_required": true,
+            "last_updated": "2026-02-20T16:56:56.292142Z"
+        },
+        {
+            "id": "6479fac4-fdaf-4c9b-80cf-34df623351eb",
+            "name_normalized": "Сварка, отопление, водопровод",
+            "inn": null,
+            "entity_type": "unknown",
+            "phones": [
+                "+79620496747"
+            ],
+            "addresses": [
+                {
+                    "raw": "р-н Ленинский· выезжает по городу",
+                    "district": "Ленинский"
+                }
+            ],
+            "average_rating": 4.7,
+            "reviews_count": 34,
+            "risk_level": "yellow",
+            "merged_sources": [
+                "avito"
+            ],
+            "manual_review_required": true,
+            "last_updated": "2026-02-20T16:56:56.292142Z"
+        },
+        {
+            "id": "95dc7df6-0f5d-4ca5-9329-927bd9a9b009",
+            "name_normalized": "Отопление, обвязка котлов, теплый пол",
+            "inn": null,
+            "entity_type": "unknown",
+            "phones": [
+                "+79343357063"
+            ],
+            "addresses": [
+                {
+                    "raw": "р-н Кировский· выезжает по городу",
+                    "district": "Кировский"
+                }
+            ],
+            "average_rating": null,
+            "reviews_count": null,
+            "risk_level": "yellow",
+            "merged_sources": [
+                "avito"
+            ],
+            "manual_review_required": true,
+            "last_updated": "2026-02-20T16:56:56.292142Z"
+        }
+    ]
+}

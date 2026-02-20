@@ -30,7 +30,7 @@ from src.proxy import proxy_manager
 log = structlog.get_logger(__name__)
 
 AVITO_BASE = "https://www.avito.ru"
-AVITO_SEARCH = f"{AVITO_BASE}/omsk/uslugi"
+AVITO_SEARCH = f"{AVITO_BASE}/omsk/predlozheniya_uslug"
 
 _HEADERS = {
     "User-Agent": (
@@ -78,6 +78,41 @@ class _SpfaCookiesProvider:
 
     def get(self) -> dict:
         return self._cookies or {}
+
+    def fetch_phones(self, ad_ids: list[str]) -> dict[str, str]:
+        """Fetch phone numbers for a batch of ad IDs via spfa.ru/api/phone/.
+
+        Returns dict {ad_id: phone} for ads where phone was found.
+        Processes in chunks of 50 (API limit).
+        """
+        import requests
+
+        result: dict[str, str] = {}
+        for i in range(0, len(ad_ids), 50):
+            chunk = ad_ids[i : i + 50]
+            try:
+                r = requests.post(
+                    f"{self._API}/phone/",
+                    json={"api_key": self._api_key, "ads": chunk},
+                    timeout=30,
+                )
+                r.raise_for_status()
+                data = r.json()
+                if data.get("success"):
+                    for item in data.get("results", []):
+                        phone = item.get("phone")
+                        if phone:
+                            result[str(item["ad_id"])] = phone
+                    meta = data.get("meta", {})
+                    log.info(
+                        "avito.phones.batch_done",
+                        chunk_size=len(chunk),
+                        success=meta.get("success", 0),
+                        time_sec=meta.get("time_sec"),
+                    )
+            except Exception as exc:
+                log.warning("avito.phones.error", error=str(exc), chunk_start=i)
+        return result
 
     def handle_block(self) -> None:
         if not self._id:
@@ -162,6 +197,29 @@ class AvitoCollector(AbstractCollector):
 
     def __init__(self) -> None:
         self._cookies_provider = _build_cookies_provider()
+
+    async def enrich_phones(self, companies: list[RawCompany]) -> None:
+        """Fetch phone numbers for collected companies via spfa.ru/api/phone/.
+
+        Call this after collection (and optional limiting) to avoid wasting credits.
+        """
+        if not self._cookies_provider:
+            return
+        avito = [c for c in companies if c.source == "avito" and c.source_id]
+        if not avito:
+            return
+        ad_ids = [c.source_id for c in avito]
+        log.info("avito.phones.start", total=len(ad_ids))
+        phones = await asyncio.to_thread(
+            self._cookies_provider.fetch_phones, ad_ids
+        )
+        matched = 0
+        for company in avito:
+            phone = phones.get(company.source_id)
+            if phone:
+                company.phones = [phone]
+                matched += 1
+        log.info("avito.phones.done", matched=matched, total=len(avito))
 
     async def collect(self, keyword: str) -> list[RawCompany]:
         url = f"{AVITO_SEARCH}?q={quote_plus(keyword)}"
