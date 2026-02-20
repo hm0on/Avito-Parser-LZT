@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     # SX.org proxy API key (stored for future wiring)
     sx_proxy_api_key: str = Field(default="", alias="SX_PROXY_API_KEY")
 
+    # Avito cookies via spfa.ru (~12₽/set, lasts 12h) — bypass Avito firewall
+    # Register at https://spfa.ru to get a key
+    avito_cookies_api_key: str = Field(default="", alias="AVITO_COOKIES_API_KEY")
+
     # Stage 2 Review Enrichment
     serpapi_key: str = Field(default="", alias="SERPAPI_KEY")
     enable_review_enrichment: bool = Field(default=True, alias="ENABLE_REVIEW_ENRICHMENT")

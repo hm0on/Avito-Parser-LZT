@@ -60,8 +60,8 @@ async def test_parse_via_api_returns_reviews(parser, api_data):
     url = f"https://omsk.flamp.ru/firm/burpro-{filial_id}"
     api_url = REVIEWS_API.format(filial_id=filial_id)
 
-    async with respx.mock:
-        respx.get(re.compile(re.escape(api_url))).mock(return_value=Response(200, json=api_data))
+    async with respx.mock as mock:
+        mock.get(re.compile(re.escape(api_url))).mock(return_value=Response(200, json=api_data))
         reviews = await parser.parse(url, "БурПро")
 
     assert len(reviews) == 3
@@ -76,8 +76,8 @@ async def test_parse_via_api_review_date_parsed(parser, api_data):
     url = f"https://omsk.flamp.ru/firm/burpro-{filial_id}"
     api_url = REVIEWS_API.format(filial_id=filial_id)
 
-    async with respx.mock:
-        respx.get(re.compile(re.escape(api_url))).mock(return_value=Response(200, json=api_data))
+    async with respx.mock as mock:
+        mock.get(re.compile(re.escape(api_url))).mock(return_value=Response(200, json=api_data))
         reviews = await parser.parse(url, "БурПро")
 
     assert reviews[0].review_date is not None
@@ -95,11 +95,9 @@ async def test_parse_falls_back_on_403(parser, page_html):
     url = f"https://omsk.flamp.ru/firm/burpro-{filial_id}"
     api_url = REVIEWS_API.format(filial_id=filial_id)
 
-    async with respx.mock:
-        # Primary JSON API returns 403
-        respx.get(re.compile(re.escape(api_url))).mock(return_value=Response(403))
-        # Fallback HTML scrape
-        respx.get(url).mock(return_value=Response(200, text=page_html))
+    async with respx.mock as mock:
+        mock.get(re.compile(re.escape(api_url))).mock(return_value=Response(403))
+        mock.get(url).mock(return_value=Response(200, text=page_html))
         reviews = await parser.parse(url, "БурПро")
 
     assert len(reviews) >= 1

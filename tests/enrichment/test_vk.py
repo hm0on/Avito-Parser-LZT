@@ -1,13 +1,14 @@
-"""VK parser tests — mocked VK API v5.199."""
+"""VK parser tests — Playwright-based web scraping (no VK API token needed).
 
-import re
+Since VkParser now scrapes m.vk.com via Playwright, browser-dependent tests
+mock the `_scrape()` method to avoid launching a real browser.
+Pure-logic helpers (_extract_screen_name, can_handle) are tested without mocks.
+"""
 
 import pytest
-import respx
-from httpx import Response
 
-from src.enrichment.review_parsers.vk import VK_API_BASE, VkParser
-from tests.conftest import load_json_fixture
+from src.collectors.base import RawReview
+from src.enrichment.review_parsers.vk import VkParser
 
 
 @pytest.fixture
@@ -15,23 +16,8 @@ def parser() -> VkParser:
     return VkParser()
 
 
-@pytest.fixture
-def groups_data():
-    return load_json_fixture("vk_groups_getbyid.json")
-
-
-@pytest.fixture
-def wall_data():
-    return load_json_fixture("vk_wall_get.json")
-
-
-@pytest.fixture(autouse=True)
-def set_vk_token(monkeypatch):
-    monkeypatch.setattr("src.enrichment.review_parsers.vk.settings.vk_access_token", "FAKE_TOKEN")
-
-
 # ---------------------------------------------------------------------------
-# can_handle / guards
+# can_handle
 # ---------------------------------------------------------------------------
 
 
@@ -47,15 +33,20 @@ def test_cannot_handle_non_vk(parser):
     assert not parser.can_handle("https://flamp.ru/firm/burpro-123")
 
 
-async def test_skip_when_no_token(parser, monkeypatch):
-    monkeypatch.setattr("src.enrichment.review_parsers.vk.settings.vk_access_token", "")
-    reviews = await parser.parse("https://vk.com/burpro_omsk", "БурПро")
-    assert reviews == []
+# ---------------------------------------------------------------------------
+# Guards that skip scraping
+# ---------------------------------------------------------------------------
 
 
 async def test_skip_wall_post_url(parser):
-    """Individual wall post URLs (/wall-123_456) should be skipped."""
+    """Individual wall post URLs (/wall-123_456) should be skipped without scraping."""
     reviews = await parser.parse("https://vk.com/wall-123456789_42", "БурПро")
+    assert reviews == []
+
+
+async def test_skip_numeric_path(parser):
+    """vk.com/12345 looks like a user profile, not a group — skip it."""
+    reviews = await parser.parse("https://vk.com/123456", "Test")
     assert reviews == []
 
 
@@ -69,120 +60,98 @@ def test_extract_screen_name_standard(parser):
 
 
 def test_extract_screen_name_numeric_returns_none(parser):
-    """Numeric-only paths are user IDs, not group screen names."""
     assert parser._extract_screen_name("https://vk.com/123456") is None
 
 
 def test_extract_screen_name_with_trailing_slash(parser):
-    assert parser._extract_screen_name("https://vk.com/burpro_omsk/") == "burpro_omsk"
+    # The regex stops at '/', so burpro_omsk is captured before the slash
+    result = parser._extract_screen_name("https://vk.com/burpro_omsk/")
+    assert result == "burpro_omsk"
+
+
+def test_extract_screen_name_with_query(parser):
+    result = parser._extract_screen_name("https://vk.com/burpro_omsk?w=wall-1_2")
+    assert result == "burpro_omsk"
 
 
 # ---------------------------------------------------------------------------
-# Full parse — groups.getById + wall.get
+# Full parse — _scrape() mocked to avoid real browser
 # ---------------------------------------------------------------------------
 
 
-@respx.mock
-async def test_parse_returns_reviews(parser, groups_data, wall_data):
-    respx.get(re.compile(re.escape(f"{VK_API_BASE}/groups.getById"))).mock(
-        return_value=Response(200, json=groups_data)
-    )
-    respx.get(re.compile(re.escape(f"{VK_API_BASE}/wall.get"))).mock(
-        return_value=Response(200, json=wall_data)
-    )
+async def test_parse_returns_reviews(parser, monkeypatch):
+    """parse() should return whatever _scrape() yields."""
+    fake_reviews = [
+        RawReview(
+            source="vk",
+            text="Пробурили скважину за 2 дня, всё отлично!",
+            rating=None,
+            author=None,
+            review_date=None,
+            source_link="https://vk.com/burpro_omsk",
+        ),
+        RawReview(
+            source="vk",
+            text="Работа выполнена качественно",
+            rating=None,
+            author=None,
+            review_date=None,
+            source_link="https://vk.com/burpro_omsk",
+        ),
+    ]
+
+    async def fake_scrape(screen_name):
+        return fake_reviews
+
+    monkeypatch.setattr(parser, "_scrape", fake_scrape)
 
     reviews = await parser.parse("https://vk.com/burpro_omsk", "БурПро")
-
-    # wall fixture has 3 items but one has empty text → 2 reviews expected
     assert len(reviews) == 2
     assert reviews[0].source == "vk"
-    assert reviews[0].rating is None  # wall posts have no star rating
+    assert reviews[0].rating is None
     assert "Пробурили скважину" in reviews[0].text
 
 
-@respx.mock
-async def test_parse_review_date_converted(parser, groups_data, wall_data):
-    respx.get(re.compile(re.escape(f"{VK_API_BASE}/groups.getById"))).mock(
-        return_value=Response(200, json=groups_data)
-    )
-    respx.get(re.compile(re.escape(f"{VK_API_BASE}/wall.get"))).mock(
-        return_value=Response(200, json=wall_data)
-    )
+async def test_parse_returns_empty_on_scrape_error(parser, monkeypatch):
+    """If _scrape() raises, parse() should safely return []."""
 
-    reviews = await parser.parse("https://vk.com/burpro_omsk", "БурПро")
+    async def failing_scrape(screen_name):
+        raise RuntimeError("browser crashed")
 
-    # date should be populated (UNIX timestamp → datetime)
-    assert reviews[0].review_date is not None
-
-
-@respx.mock
-async def test_parse_skips_empty_text_posts(parser, groups_data, wall_data):
-    """Wall posts with empty text should be excluded."""
-    respx.get(re.compile(re.escape(f"{VK_API_BASE}/groups.getById"))).mock(
-        return_value=Response(200, json=groups_data)
-    )
-    respx.get(re.compile(re.escape(f"{VK_API_BASE}/wall.get"))).mock(
-        return_value=Response(200, json=wall_data)
-    )
-
-    reviews = await parser.parse("https://vk.com/burpro_omsk", "БурПро")
-    # All returned reviews should have non-empty text
-    for rv in reviews:
-        assert rv.text
-
-
-@respx.mock
-async def test_parse_api_error_in_200_response(parser, groups_data):
-    """VK returns HTTP 200 with {"error": ...} on failures — must return []."""
-    respx.get(re.compile(re.escape(f"{VK_API_BASE}/groups.getById"))).mock(
-        return_value=Response(200, json=groups_data)
-    )
-    # wall.get returns HTTP 200 but with an error payload
-    respx.get(re.compile(re.escape(f"{VK_API_BASE}/wall.get"))).mock(
-        return_value=Response(200, json={"error": {"error_code": 15, "error_msg": "Access denied"}})
-    )
+    monkeypatch.setattr(parser, "_scrape", failing_scrape)
 
     reviews = await parser.parse("https://vk.com/burpro_omsk", "БурПро")
     assert reviews == []
 
 
-@respx.mock
-async def test_parse_groups_api_error(parser):
-    """If groups.getById returns an error payload, parser should return []."""
-    respx.get(re.compile(re.escape(f"{VK_API_BASE}/groups.getById"))).mock(
-        return_value=Response(200, json={"error": {"error_code": 100, "error_msg": "Not found"}})
-    )
+async def test_parse_empty_group(parser, monkeypatch):
+    """If _scrape() returns [], parse() returns []."""
 
-    reviews = await parser.parse("https://vk.com/unknown_group", "Неизвестная компания")
+    async def empty_scrape(screen_name):
+        return []
+
+    monkeypatch.setattr(parser, "_scrape", empty_scrape)
+
+    reviews = await parser.parse("https://vk.com/empty_group", "Пустая компания")
     assert reviews == []
 
 
-@respx.mock
-async def test_parse_group_not_found(parser):
-    """If groups.getById returns empty groups list, parser should return []."""
-    respx.get(re.compile(re.escape(f"{VK_API_BASE}/groups.getById"))).mock(
-        return_value=Response(200, json={"response": {"groups": []}})
+async def test_parse_source_link_format(parser, monkeypatch):
+    """Reviews source_link should point to the group page."""
+    expected_link = "https://vk.com/burpro_omsk"
+    fake_review = RawReview(
+        source="vk",
+        text="Хорошая работа",
+        rating=None,
+        author=None,
+        review_date=None,
+        source_link=expected_link,
     )
 
-    reviews = await parser.parse("https://vk.com/nonexistent", "Test")
-    assert reviews == []
+    async def fake_scrape(screen_name):
+        return [fake_review]
 
-
-# ---------------------------------------------------------------------------
-# source_link format
-# ---------------------------------------------------------------------------
-
-
-@respx.mock
-async def test_parse_source_link_format(parser, groups_data, wall_data):
-    respx.get(re.compile(re.escape(f"{VK_API_BASE}/groups.getById"))).mock(
-        return_value=Response(200, json=groups_data)
-    )
-    respx.get(re.compile(re.escape(f"{VK_API_BASE}/wall.get"))).mock(
-        return_value=Response(200, json=wall_data)
-    )
+    monkeypatch.setattr(parser, "_scrape", fake_scrape)
 
     reviews = await parser.parse("https://vk.com/burpro_omsk", "БурПро")
-    group_id = 123456789
-    for rv in reviews:
-        assert rv.source_link.startswith(f"https://vk.com/wall-{group_id}_")
+    assert reviews[0].source_link == expected_link

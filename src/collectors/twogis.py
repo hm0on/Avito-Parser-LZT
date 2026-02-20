@@ -21,6 +21,10 @@ _CATALOG_URL = f"https://{_CATALOG_HOST}/3.0/items"
 _REVIEWS_URL = "https://public-api.reviews.2gis.com/2.0/branches/{branch_id}/reviews"
 _HOME_PAGE = "https://2gis.ru/omsk"
 
+# Public aliases kept for backward-compat with tests
+CATALOG_URL = _CATALOG_URL
+REVIEWS_URL = _REVIEWS_URL
+
 
 class TwoGisCollector(AbstractCollector):
     source_name = "2gis"
