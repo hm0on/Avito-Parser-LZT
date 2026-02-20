@@ -47,7 +47,7 @@ class ReviewSearcher:
 
         log.info("review_searcher.start", raw_id=str(raw.id), name=name)
 
-        queries = self._build_queries(name)
+        queries = self._build_queries(name, raw.phones)
         all_urls: set[str] = set()
 
         for i, query in enumerate(queries):
@@ -67,12 +67,19 @@ class ReviewSearcher:
         log.info("review_searcher.done", raw_id=str(raw.id), reviews_found=len(reviews))
         return reviews
 
-    def _build_queries(self, name: str) -> list[str]:
-        return [
+    def _build_queries(self, name: str, phones: list[str] | None = None) -> list[str]:
+        queries = [
             f'"{name}" Омск отзывы',
             f'"{name}" Омск flamp',
-            f'"{name}" Омск vk отзывы',
         ]
+
+        # Add phone-based queries for better results with generic names
+        if phones:
+            for phone in phones[:1]:  # Only use first phone to avoid too many queries
+                queries.append(f'"{phone}" отзывы')
+                queries.append(f'"{phone}" flamp')
+
+        return queries
 
     async def _search_urls(self, query: str) -> list[str]:
         """Try DDG, fall back to SerpAPI if DDG fails and key is available."""

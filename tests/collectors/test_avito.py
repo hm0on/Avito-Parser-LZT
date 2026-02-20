@@ -196,15 +196,15 @@ async def test_collect_empty_listing(httpserver, monkeypatch):
 
 
 def test_parse_float_normal():
-    from src.collectors.avito import _parse_float
-    assert _parse_float("4.9") == pytest.approx(4.9)
-    assert _parse_float("4,2") == pytest.approx(4.2)
-    assert _parse_float("") is None
-    assert _parse_float("нет оценки") is None
+    from src.collectors.base import parse_float
+    assert parse_float("4.9") == pytest.approx(4.9)
+    assert parse_float("4,2") == pytest.approx(4.2)
+    assert parse_float("") is None
+    assert parse_float("нет оценки") is None
 
 
 def test_parse_int_normal():
-    from src.collectors.avito import _parse_int
-    assert _parse_int("23 отзыва") == 23
-    assert _parse_int("8 отзывов") == 8
-    assert _parse_int("") is None
+    from src.collectors.base import parse_int
+    assert parse_int("23 отзыва") == 23
+    assert parse_int("8 отзывов") == 8
+    assert parse_int("") is None

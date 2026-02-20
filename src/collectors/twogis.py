@@ -16,14 +16,10 @@ from src.proxy import proxy_manager
 
 log = structlog.get_logger(__name__)
 
-_CATALOG_HOST = "catalog.api.2gis.com"
-_CATALOG_URL = f"https://{_CATALOG_HOST}/3.0/items"
-_REVIEWS_URL = "https://public-api.reviews.2gis.com/2.0/branches/{branch_id}/reviews"
+CATALOG_HOST = "catalog.api.2gis.com"
+CATALOG_URL = f"https://{CATALOG_HOST}/3.0/items"
+REVIEWS_URL = "https://public-api.reviews.2gis.com/2.0/branches/{branch_id}/reviews"
 _HOME_PAGE = "https://2gis.ru/omsk"
-
-# Public aliases kept for backward-compat with tests
-CATALOG_URL = _CATALOG_URL
-REVIEWS_URL = _REVIEWS_URL
 
 
 class TwoGisCollector(AbstractCollector):
@@ -80,7 +76,7 @@ class TwoGisCollector(AbstractCollector):
                 page = await context.new_page()
 
                 def _on_request(request):
-                    if _CATALOG_HOST in request.url and not captured:
+                    if CATALOG_HOST in request.url and not captured:
                         params = parse_qs(urlparse(request.url).query)
                         if "key" in params:
                             captured.append(params["key"][0])
@@ -116,7 +112,7 @@ class TwoGisCollector(AbstractCollector):
 
             while True:
                 params["page"] = page
-                resp = await client.get(_CATALOG_URL, params=params)
+                resp = await client.get(CATALOG_URL, params=params)
 
                 # If our captured key has expired, clear cache so next call re-captures it
                 if resp.status_code in (401, 403):
@@ -201,7 +197,7 @@ class TwoGisCollector(AbstractCollector):
         api_key: str,
         client: httpx.AsyncClient,
     ) -> list[RawReview]:
-        url = _REVIEWS_URL.format(branch_id=branch_id)
+        url = REVIEWS_URL.format(branch_id=branch_id)
         params = {"key": api_key, "page_size": 50, "is_advertiser": "false"}
         try:
             resp = await client.get(url, params=params)

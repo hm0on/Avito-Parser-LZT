@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import time
 from pathlib import Path
 from urllib.parse import quote_plus
@@ -21,9 +20,8 @@ from urllib.parse import quote_plus
 import httpx
 import structlog
 from bs4 import BeautifulSoup
-from tenacity import retry, stop_after_attempt, wait_exponential
 
-from src.collectors.base import AbstractCollector, RawCompany
+from src.collectors.base import AbstractCollector, RawCompany, RawReview, parse_float, parse_int
 from src.config import settings
 from src.proxy import proxy_manager
 
@@ -221,6 +219,235 @@ class AvitoCollector(AbstractCollector):
                 matched += 1
         log.info("avito.phones.done", matched=matched, total=len(avito))
 
+    async def enrich_reviews(self, companies: list[RawCompany]) -> None:
+        """Scrape seller reviews for Avito companies using Playwright.
+
+        For companies with reviews_count > 0, navigates to the ad page,
+        finds the seller's profile, and scrapes actual review texts.
+        """
+        candidates = [
+            c for c in companies
+            if c.source == "avito" and (c.reviews_count or 0) > 0 and c.source_link
+        ]
+        if not candidates:
+            return
+
+        log.info("avito.reviews.start", count=len(candidates))
+
+        from playwright.async_api import async_playwright
+
+        async with async_playwright() as pw:
+            proxy = proxy_manager.playwright_proxy()
+            browser = await pw.chromium.launch(
+                headless=True,
+                proxy=proxy,
+                args=["--no-sandbox", "--disable-dev-shm-usage"],
+            )
+            try:
+                context = await browser.new_context(
+                    user_agent=_HEADERS["User-Agent"],
+                    locale="ru-RU",
+                )
+
+                # Set Avito cookies if available
+                if self._cookies_provider:
+                    cookies = self._cookies_provider.get()
+                    if cookies:
+                        await context.add_cookies([
+                            {"name": k, "value": str(v), "domain": ".avito.ru", "path": "/"}
+                            for k, v in cookies.items()
+                        ])
+
+                for company in candidates:
+                    try:
+                        reviews = await self._scrape_seller_reviews(context, company.source_link)
+                        if reviews:
+                            company.reviews = reviews
+                            log.info(
+                                "avito.reviews.scraped",
+                                name=company.name_raw,
+                                count=len(reviews),
+                            )
+                        else:
+                            log.debug("avito.reviews.empty", name=company.name_raw)
+                    except Exception as exc:
+                        log.warning(
+                            "avito.reviews.error",
+                            name=company.name_raw,
+                            error=str(exc),
+                        )
+                    await asyncio.sleep(1.5)  # Be polite to Avito
+            finally:
+                await browser.close()
+
+        total_reviews = sum(len(c.reviews) for c in candidates)
+        log.info("avito.reviews.done", total_reviews=total_reviews)
+
+    async def _scrape_seller_reviews(self, context, source_link: str) -> list[RawReview]:
+        """Navigate to ad → find seller profile → scrape reviews."""
+        captured_reviews: list[RawReview] = []
+        page = await context.new_page()
+
+        # Intercept API responses that contain review data
+        async def _on_response(response):
+            try:
+                url = response.url
+                if response.status == 200 and ("rating" in url or "review" in url):
+                    content_type = response.headers.get("content-type", "")
+                    if "json" in content_type:
+                        data = await response.json()
+                        self._extract_reviews_from_json(data, source_link, captured_reviews)
+            except Exception:
+                pass
+
+        page.on("response", _on_response)
+
+        try:
+            # Step 1: Visit ad page
+            resp = await page.goto(source_link, wait_until="domcontentloaded", timeout=30_000)
+            if not resp or resp.status >= 400:
+                return []
+
+            await page.wait_for_timeout(1500)
+
+            # Step 2: Find seller profile link
+            seller_href = None
+            for selector in ['a[href*="/user/"]', 'a[data-marker*="seller"]']:
+                el = await page.query_selector(selector)
+                if el:
+                    href = await el.get_attribute("href")
+                    if href and "/user/" in href and "login" not in href:
+                        seller_href = href
+                        break
+
+            if not seller_href:
+                return []
+
+            # Step 3: Navigate to seller profile
+            if seller_href.startswith("/"):
+                seller_href = f"{AVITO_BASE}{seller_href}"
+
+            # Ensure we go to profile page
+            if "/profile" not in seller_href:
+                seller_href = seller_href.rstrip("/") + "/profile"
+
+            await page.goto(seller_href, wait_until="networkidle", timeout=30_000)
+            await page.wait_for_timeout(2000)
+
+            # If API interception captured reviews, return them
+            if captured_reviews:
+                return captured_reviews
+
+            # Step 4: Try to click reviews/ratings tab
+            for tab_text in ["Отзывы", "отзыв", "Оценки", "оценк"]:
+                try:
+                    tab = page.get_by_text(tab_text, exact=False).first
+                    if await tab.is_visible():
+                        await tab.click()
+                        await page.wait_for_timeout(2000)
+                        break
+                except Exception:
+                    continue
+
+            # Check if API captured anything after clicking
+            if captured_reviews:
+                return captured_reviews
+
+            # Fallback: extract from DOM
+            return await self._extract_reviews_from_dom(page, source_link)
+        finally:
+            await page.close()
+
+    def _extract_reviews_from_json(
+        self, data: dict, source_link: str, out: list[RawReview]
+    ) -> None:
+        """Parse reviews from intercepted Avito API JSON response."""
+        if not isinstance(data, dict):
+            return
+
+        # Try different JSON structures
+        items = (
+            data.get("reviews")
+            or data.get("ratings")
+            or data.get("items")
+            or (data.get("result", {}).get("reviews") if isinstance(data.get("result"), dict) else None)
+            or []
+        )
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+
+            text = (item.get("text") or item.get("body") or item.get("comment") or "").strip()
+            if not text or len(text) < 10:
+                continue
+
+            score = item.get("score") or item.get("rating")
+            author_data = item.get("sender") or item.get("author") or item.get("user")
+            author = None
+            if isinstance(author_data, dict):
+                author = author_data.get("name") or author_data.get("public_name")
+            elif isinstance(author_data, str):
+                author = author_data
+
+            out.append(
+                RawReview(
+                    source="avito",
+                    text=text[:500],
+                    rating=float(score) if score else None,
+                    author=author,
+                    review_date=None,
+                    source_link=source_link,
+                )
+            )
+
+    async def _extract_reviews_from_dom(self, page, source_link: str) -> list[RawReview]:
+        """Fallback: extract reviews from visible DOM elements."""
+        reviews = []
+
+        # Try multiple selectors for review containers
+        selectors = [
+            '[data-marker*="review"]',
+            '[data-marker*="rating"] li',
+            '[class*="review"]',
+            '[class*="rating-item"]',
+        ]
+
+        for selector in selectors:
+            try:
+                elements = await page.query_selector_all(selector)
+                if not elements:
+                    continue
+
+                for el in elements[:50]:  # Limit to 50 reviews
+                    try:
+                        text = (await el.inner_text()).strip()
+                    except Exception:
+                        continue
+
+                    if text and 20 < len(text) < 1500:
+                        # Skip navigation/header elements
+                        if any(skip in text.lower() for skip in ["войти", "зарегистрироваться", "avito", "продолжить"]):
+                            continue
+
+                        reviews.append(
+                            RawReview(
+                                source="avito",
+                                text=text[:500],
+                                rating=None,
+                                author=None,
+                                review_date=None,
+                                source_link=source_link,
+                            )
+                        )
+
+                if reviews:
+                    break
+            except Exception:
+                continue
+
+        return reviews
+
     async def collect(self, keyword: str) -> list[RawCompany]:
         url = f"{AVITO_SEARCH}?q={quote_plus(keyword)}"
         log.info("avito.collect.start", keyword=keyword, url=url)
@@ -265,10 +492,11 @@ class AvitoCollector(AbstractCollector):
                 async with httpx.AsyncClient(
                     proxy=proxy_url or None,
                     headers=_HEADERS,
+                    cookies=cookies,
                     timeout=30.0,
                     follow_redirects=True,
                 ) as client:
-                    resp = await client.get(url, cookies=cookies)
+                    resp = await client.get(url)
 
                     if resp.status_code == 429:
                         wait = 5 * attempt
@@ -345,11 +573,11 @@ def _parse_card(card, keyword: str) -> RawCompany | None:
     # Rating (try specific first, then generic)
     rating_el = card.find(attrs={"data-marker": "seller-rating/score"}) or \
                 card.find(attrs={"data-marker": "seller-rating"})
-    average_rating = _parse_float(rating_el.get_text(strip=True)) if rating_el else None
+    average_rating = parse_float(rating_el.get_text(strip=True)) if rating_el else None
 
     # Reviews count ("29 отзывов" → 29)
     reviews_el = card.find(attrs={"data-marker": "seller-info/summary"})
-    reviews_count = _parse_int(reviews_el.get_text(strip=True)) if reviews_el else None
+    reviews_count = parse_int(reviews_el.get_text(strip=True)) if reviews_el else None
 
     return RawCompany(
         source="avito",
@@ -366,19 +594,3 @@ def _parse_card(card, keyword: str) -> RawCompany | None:
 def _is_blocked(html_text: str) -> bool:
     lower = html_text[:3000].lower()
     return any(m in lower for m in _BLOCK_MARKERS)
-
-
-def _parse_float(text: str) -> float | None:
-    m = re.search(r"[\d]+[,.]?[\d]*", text.replace(",", "."))
-    try:
-        return float(m.group().replace(",", ".")) if m else None
-    except ValueError:
-        return None
-
-
-def _parse_int(text: str) -> int | None:
-    m = re.search(r"\d+", text)
-    try:
-        return int(m.group()) if m else None
-    except ValueError:
-        return None

@@ -8,7 +8,7 @@ import structlog
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from src.collectors.base import AbstractCollector, RawCompany, RawReview
+from src.collectors.base import AbstractCollector, RawCompany, RawReview, parse_float, parse_int
 from src.config import settings
 from src.proxy import proxy_manager
 
@@ -97,13 +97,13 @@ class YandexCollector(AbstractCollector):
 
         # Rating
         rating_el = await card.query_selector("[class*='business-rating-badge-view__rating']")
-        average_rating = _parse_float(
+        average_rating = parse_float(
             (await rating_el.inner_text()).strip() if rating_el else ""
         )
 
         # Reviews count
         reviews_el = await card.query_selector("[class*='business-rating-badge-view__count']")
-        reviews_count = _parse_int(
+        reviews_count = parse_int(
             (await reviews_el.inner_text()).strip() if reviews_el else ""
         )
 
@@ -150,14 +150,3 @@ class YandexCollector(AbstractCollector):
         ) if name_raw else None
 
 
-def _parse_float(text: str) -> float | None:
-    m = re.search(r"[\d]+[.,]?[\d]*", text.replace(",", "."))
-    try:
-        return float(m.group()) if m else None
-    except ValueError:
-        return None
-
-
-def _parse_int(text: str) -> int | None:
-    digits = re.sub(r"\D", "", text)
-    return int(digits) if digits else None

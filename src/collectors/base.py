@@ -1,9 +1,10 @@
 """Abstract base collector — defines the interface every collector must implement."""
 
+import re
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 
 
 @dataclass
@@ -27,7 +28,7 @@ class RawCompany:
     average_rating: float | None = None
     reviews_count: int | None = None
 
-    collected_at: datetime = field(default_factory=datetime.utcnow)
+    collected_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     # Attached reviews
     reviews: list["RawReview"] = field(default_factory=list)
@@ -64,3 +65,21 @@ class AbstractCollector(ABC):
             results = await self.collect(kw)
             all_results.extend(results)
         return all_results
+
+
+# ── Shared parsing helpers ────────────────────────────────────────────────────
+
+
+def parse_float(text: str) -> float | None:
+    """Extract the first decimal number from text ('4,7' → 4.7)."""
+    m = re.search(r"[\d]+[,.]?[\d]*", text.replace(",", "."))
+    try:
+        return float(m.group()) if m else None
+    except ValueError:
+        return None
+
+
+def parse_int(text: str) -> int | None:
+    """Extract the first integer from text ('29 отзывов' → 29)."""
+    digits = re.sub(r"\D", "", text)
+    return int(digits) if digits else None

@@ -104,9 +104,15 @@ def test_classify_urls_case_insensitive_dedup(searcher):
 # ---------------------------------------------------------------------------
 
 
-def test_build_queries_contains_three_queries(searcher):
+def test_build_queries_contains_base_queries(searcher):
     queries = searcher._build_queries("БурПро")
-    assert len(queries) == 3
+    assert len(queries) == 2  # Base queries without phones
+
+
+def test_build_queries_with_phone_adds_phone_queries(searcher):
+    queries = searcher._build_queries("БурПро", phones=["+79991234567"])
+    assert len(queries) == 4  # 2 base + 2 phone queries
+    assert any("+79991234567" in q for q in queries)
 
 
 def test_build_queries_contain_name(searcher):

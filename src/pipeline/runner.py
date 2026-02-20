@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 import structlog
 
@@ -30,12 +30,13 @@ log = structlog.get_logger(__name__)
 class PipelineRunner:
     """Orchestrates all 5 pipeline stages."""
 
-    def __init__(self) -> None:
+    def __init__(self, company_limit: int = 0) -> None:
         self.collectors = [
             AvitoCollector(),
             TwoGisCollector(),
             YandexCollector(),
         ]
+        self.company_limit = company_limit
         self.enricher = Enricher()
         self.deduplicator = Deduplicator()
         self.summarizer = ReviewSummarizer()
@@ -43,7 +44,7 @@ class PipelineRunner:
 
     async def run(self) -> None:
         log.info("pipeline.start")
-        start = datetime.utcnow()
+        start = datetime.now(UTC)
 
         async with AsyncSessionLocal() as session:
             # ── Stage 1: Collect ─────────────────────────────────────────
@@ -168,7 +169,7 @@ class PipelineRunner:
                 session.add(clean)
 
             await session.commit()
-            elapsed = (datetime.utcnow() - start).total_seconds()
+            elapsed = (datetime.now(UTC) - start).total_seconds()
             log.info("pipeline.done", elapsed_s=elapsed, canonical_count=len(canonical_cards))
 
     async def _collect_all(self) -> list[RawCompany]:
@@ -185,10 +186,21 @@ class PipelineRunner:
             else:
                 all_companies.extend(result)
 
-        # Fetch phone numbers for Avito companies via spfa.ru
+        # Apply limit (for test runs) BEFORE expensive enrichment
+        if self.company_limit and len(all_companies) > self.company_limit:
+            log.info(
+                "pipeline.limit_applied",
+                original=len(all_companies),
+                limited=self.company_limit,
+            )
+            all_companies = all_companies[: self.company_limit]
+
+        # Post-collection enrichment (phones, reviews)
         for collector in self.collectors:
             if hasattr(collector, "enrich_phones"):
                 await collector.enrich_phones(all_companies)
+            if hasattr(collector, "enrich_reviews"):
+                await collector.enrich_reviews(all_companies)
 
         return all_companies
 
