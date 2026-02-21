@@ -119,7 +119,12 @@ class PipelineRunner:
                         ))
 
             await session.flush()
-            log.info("pipeline.stage2.done", count=len(enriched_pairs))
+            log.info(
+                "pipeline.stage2.done",
+                count=len(enriched_pairs),
+                extra_reviews_total=sum(len(v) for v in extra_reviews_map.values()),
+                companies_with_extra_reviews=len(extra_reviews_map),
+            )
 
             # ── Stage 3: Deduplicate ─────────────────────────────────────
             log.info("pipeline.stage3.dedup")
@@ -175,7 +180,9 @@ class PipelineRunner:
     async def _collect_all(self) -> list[RawCompany]:
         tasks = [collector.run() for collector in self.collectors]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        all_companies: list[RawCompany] = []
+
+        # Group by source so we can distribute the limit evenly
+        by_source: dict[str, list[RawCompany]] = {}
         for i, result in enumerate(results):
             if isinstance(result, Exception):
                 log.error(
@@ -184,16 +191,50 @@ class PipelineRunner:
                     error=str(result),
                 )
             else:
-                all_companies.extend(result)
+                source = self.collectors[i].source_name
+                by_source[source] = result
 
-        # Apply limit (for test runs) BEFORE expensive enrichment
-        if self.company_limit and len(all_companies) > self.company_limit:
+        log.info(
+            "pipeline.collected_per_source",
+            **{src: len(items) for src, items in by_source.items()},
+        )
+
+        # Apply limit evenly across sources (round-robin)
+        all_companies: list[RawCompany] = []
+        if self.company_limit and sum(len(v) for v in by_source.values()) > self.company_limit:
+            per_source = max(1, self.company_limit // max(len(by_source), 1))
+            for src, items in by_source.items():
+                all_companies.extend(items[:per_source])
+            # Fill remaining slots from sources that have more
+            remaining = self.company_limit - len(all_companies)
+            if remaining > 0:
+                used = set(id(c) for c in all_companies)
+                for items in by_source.values():
+                    for c in items:
+                        if id(c) not in used:
+                            all_companies.append(c)
+                            remaining -= 1
+                            if remaining <= 0:
+                                break
+                    if remaining <= 0:
+                        break
             log.info(
                 "pipeline.limit_applied",
-                original=len(all_companies),
-                limited=self.company_limit,
+                original=sum(len(v) for v in by_source.values()),
+                limited=len(all_companies),
             )
-            all_companies = all_companies[: self.company_limit]
+        else:
+            for items in by_source.values():
+                all_companies.extend(items)
+
+        # Log review counts BEFORE enrichment
+        reviews_before = sum(len(c.reviews) for c in all_companies)
+        log.info(
+            "pipeline.pre_enrich",
+            companies=len(all_companies),
+            companies_with_reviews=sum(1 for c in all_companies if c.reviews),
+            total_reviews=reviews_before,
+        )
 
         # Post-collection enrichment (phones, reviews)
         for collector in self.collectors:
@@ -201,6 +242,14 @@ class PipelineRunner:
                 await collector.enrich_phones(all_companies)
             if hasattr(collector, "enrich_reviews"):
                 await collector.enrich_reviews(all_companies)
+
+        # Log review counts AFTER enrichment
+        reviews_after = sum(len(c.reviews) for c in all_companies)
+        log.info(
+            "pipeline.post_enrich",
+            companies_with_reviews=sum(1 for c in all_companies if c.reviews),
+            total_reviews=reviews_after,
+        )
 
         return all_companies
 
@@ -254,6 +303,8 @@ def _gather_reviews(
     """
     source_ids = set(card.source_records)  # str UUIDs of CompanyRaw rows
     reviews: list[dict] = []
+    stage1_count = 0
+    stage2_count = 0
 
     for raw_id in source_ids:
         # Stage-1 collector reviews
@@ -261,10 +312,21 @@ def _gather_reviews(
         if rc:
             for rv in rc.reviews:
                 reviews.append(_rv_to_dict(rv))
+                stage1_count += 1
 
         # Stage-2 enrichment reviews (Flamp/VK/Otzovik)
         for rv in extra_reviews_map.get(raw_id, []):
             reviews.append(_rv_to_dict(rv))
+            stage2_count += 1
+
+    log.debug(
+        "gather_reviews",
+        company=card.name_normalized,
+        source_ids=len(source_ids),
+        stage1_reviews=stage1_count,
+        stage2_reviews=stage2_count,
+        total=len(reviews),
+    )
 
     return reviews[: settings.max_reviews_per_company]
 
