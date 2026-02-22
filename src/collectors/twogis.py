@@ -1,11 +1,12 @@
-"""2GIS scraper — primary: Playwright UI scraping, fallback: captured API key."""
+"""2GIS scraper — primary: Playwright UI with pagination & parallel scraping, fallback: captured API key."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import re
-from urllib.parse import parse_qs, quote_plus, urlparse
+from collections.abc import Iterable
+from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
 
 import httpx
 import structlog
@@ -25,7 +26,7 @@ REVIEWS_URL = "https://public-api.reviews.2gis.com/2.0/branches/{branch_id}/revi
 _HOME_PAGE = "https://2gis.ru/omsk"
 _SEARCH_URL = "https://2gis.ru/omsk/search/{query}"
 
-# Крупные населённые пункты Омской области (добавляются к запросу для расширения поиска)
+# Крупные населённые пункты Омской области (from Denis — regional search)
 _REGION_LOCALITIES = [
     "Тара",
     "Исилькуль",
@@ -68,15 +69,16 @@ class TwoGisCollector(AbstractCollector):
                 added += 1
             return added
 
-        # 1. Primary: search in Omsk city
+        # 1. Primary: UI scraping with pagination + parallel firm pages
         companies = await self._collect_via_ui(keyword)
         if not companies:
+            # Fallback: API key
             api_key = await self._ensure_api_key()
             if api_key:
                 companies = await self._fetch_items(keyword, api_key)
         _dedup_extend(companies)
 
-        # 2. Regional: search with locality names appended to the keyword
+        # 2. Regional: search with locality names (from Denis)
         if settings.twogis_search_region:
             for locality in _REGION_LOCALITIES:
                 regional_kw = f"{keyword} {locality}"
@@ -95,12 +97,17 @@ class TwoGisCollector(AbstractCollector):
         query = quote_plus(keyword)
         search_url = _SEARCH_URL.format(query=query)
 
-        # Try proxies first, then direct.
-        use_proxy_attempts = min(3, proxy_manager.count) if proxy_manager.count > 0 else 0
-        for _ in range(use_proxy_attempts):
+        # Try proxy rotation until success, then direct.
+        if proxy_manager.count > 0:
+            use_proxy_attempts = min(proxy_manager.count, max(1, settings.twogis_max_proxy_rotations))
+        else:
+            use_proxy_attempts = 0
+
+        for attempt in range(1, use_proxy_attempts + 1):
             companies = await self._collect_via_ui_once(keyword, search_url, use_proxy=True)
             if companies:
                 return companies
+            log.info("twogis.ui.proxy_retry", attempt=attempt + 1, max_attempts=use_proxy_attempts)
         return await self._collect_via_ui_once(keyword, search_url, use_proxy=False)
 
     async def _collect_via_ui_once(
@@ -112,9 +119,11 @@ class TwoGisCollector(AbstractCollector):
     ) -> list[RawCompany]:
         async with async_playwright() as pw:
             proxy = proxy_manager.playwright_proxy() if use_proxy else None
+            headless = not settings.twogis_debug_browser
             browser = await pw.chromium.launch(
-                headless=True,
+                headless=headless,
                 proxy=proxy,
+                slow_mo=300 if settings.twogis_debug_browser else 0,
                 args=["--no-sandbox", "--disable-dev-shm-usage"],
             )
             try:
@@ -128,102 +137,292 @@ class TwoGisCollector(AbstractCollector):
                 )
                 page = await context.new_page()
                 try:
-                    await page.goto(search_url, wait_until="domcontentloaded", timeout=45_000)
+                    resp = await page.goto(search_url, wait_until="domcontentloaded", timeout=45_000)
                     await asyncio.sleep(2)
                 except Exception as exc:
                     log.warning("twogis.ui.goto_error", error=str(exc), use_proxy=use_proxy)
+                    return []
+                if resp and resp.status in (401, 403, 429, 503):
+                    log.warning("twogis.ui.blocked_status", status=resp.status, use_proxy=use_proxy)
                     return []
 
                 if "captcha.2gis.ru" in page.url:
                     log.warning("twogis.ui.captcha", use_proxy=use_proxy)
                     return []
+                first_html = await page.content()
+                if _is_forbidden_html(first_html):
+                    log.warning("twogis.ui.forbidden_page", use_proxy=use_proxy)
+                    return []
 
-                firm_urls = await self._collect_firm_urls(page)
+                search_pages = await self._collect_search_pages(page, search_url)
+                log.info("twogis.ui.pages_collected", count=len(search_pages), use_proxy=use_proxy)
+
+                firm_urls = await self._collect_firm_urls_from_pages(page, search_pages)
                 if not firm_urls:
                     log.info("twogis.ui.no_firms", use_proxy=use_proxy)
                     return []
 
-                out: list[RawCompany] = []
-                for url in firm_urls[:120]:
-                    company = await self._scrape_firm_page(context, url, keyword)
-                    if company:
-                        out.append(company)
-                    await asyncio.sleep(0.2)
-                return out
+                return await self._scrape_firm_pages_parallel(
+                    pw,
+                    firm_urls[:120],
+                    keyword,
+                    use_proxy=use_proxy,
+                )
             finally:
                 await browser.close()
 
-    async def _collect_firm_urls(self, page) -> list[str]:
-        """Scroll search page and collect unique /firm/{id} links."""
+    async def _collect_search_pages(self, page, search_url: str) -> list[str]:
+        """Build deterministic /page/N list, preferring real page count from UI."""
+        base = _normalize_search_base(page.url.split("?")[0], fallback=search_url.split("?")[0])
+        max_page = await _detect_max_search_page(page)
+        if max_page <= 0:
+            max_page = max(1, settings.twogis_search_max_pages)
+        else:
+            max_page = min(max_page, max(1, settings.twogis_search_max_pages))
+        return [base] + [f"{base}/page/{idx}" for idx in range(2, max_page + 1)]
+
+    async def _collect_firm_urls_from_pages(self, page, page_urls: Iterable[str]) -> list[str]:
+        """Visit each search page, scroll results and collect unique /firm/{id} links."""
         urls: list[str] = []
         seen: set[str] = set()
-        stable_rounds = 0
 
-        for _ in range(30):
-            found = await page.evaluate(
-                """() => {
-                    const out = [];
-                    for (const a of document.querySelectorAll('a[href*="/firm/"]')) {
-                        if (!a.href) continue;
-                        const clean = a.href.split('?')[0];
-                        if (/\\/firm\\/\\d+/.test(clean)) out.push(clean);
-                    }
-                    return out;
-                }"""
-            )
-            added = 0
-            for u in found:
-                if u not in seen:
-                    seen.add(u)
-                    urls.append(u)
-                    added += 1
-
-            await page.evaluate(
-                """() => {
-                    window.scrollBy(0, 1400);
-                    for (const el of document.querySelectorAll('div')) {
-                        if (el.scrollHeight > el.clientHeight && el.clientHeight > 200) {
-                            el.scrollTop += 1000;
-                        }
-                    }
-                }"""
-            )
-            await asyncio.sleep(0.8)
-
-            if added == 0:
-                stable_rounds += 1
-            else:
-                stable_rounds = 0
-            if stable_rounds >= 4:
+        for idx, page_url in enumerate(page_urls, start=1):
+            expected_page = _extract_page_number(page_url)
+            try:
+                resp = await page.goto(page_url, wait_until="domcontentloaded", timeout=40_000)
+                await asyncio.sleep(0.9)
+            except Exception as exc:
+                log.debug("twogis.ui.page_skip", page=page_url, index=idx, error=str(exc))
+                continue
+            if resp and resp.status in (401, 403, 429, 503):
+                log.warning("twogis.ui.page_blocked_status", page=page_url, index=idx, status=resp.status)
+                return []
+            if "captcha.2gis.ru" in page.url:
+                log.warning("twogis.ui.captcha_on_page", page=page_url, index=idx)
                 break
+            html = await page.content()
+            if _is_forbidden_html(html):
+                log.warning("twogis.ui.page_forbidden", page=page_url, index=idx)
+                return []
+            actual_page = _extract_page_number(page.url.split("?")[0])
+            # If /page/N redirects back to page 1, pagination ended -> stop.
+            if expected_page and expected_page > 1 and actual_page != expected_page:
+                log.info(
+                    "twogis.ui.pagination_end",
+                    requested=expected_page,
+                    actual=actual_page,
+                    page=page.url,
+                )
+                break
+
+            stable_rounds = 0
+            for _ in range(25):
+                found = await page.evaluate(
+                    """() => {
+                        const out = [];
+                        for (const a of document.querySelectorAll('a[href*="/firm/"]')) {
+                            if (!a.href) continue;
+                            const clean = a.href.split('?')[0];
+                            if (/\\/firm\\/\\d+/.test(clean)) out.push(clean);
+                        }
+                        return out;
+                    }"""
+                )
+                added = 0
+                for u in found:
+                    if u not in seen:
+                        seen.add(u)
+                        urls.append(u)
+                        added += 1
+
+                await page.evaluate(
+                    """() => {
+                        window.scrollBy(0, 1400);
+                        for (const el of document.querySelectorAll('div')) {
+                            if (el.scrollHeight > el.clientHeight && el.clientHeight > 200) {
+                                el.scrollTop += 1000;
+                            }
+                        }
+                    }"""
+                )
+                await asyncio.sleep(0.7)
+
+                if added == 0:
+                    stable_rounds += 1
+                else:
+                    stable_rounds = 0
+                if stable_rounds >= 4:
+                    break
 
         return urls
 
-    async def _scrape_firm_page(self, context, url: str, keyword: str) -> RawCompany | None:
+    # ----------------------------------------------------------------- parallel firm scraping
+
+    async def _scrape_firm_pages_parallel(
+        self,
+        pw,
+        firm_urls: list[str],
+        keyword: str,
+        *,
+        use_proxy: bool,
+    ) -> list[RawCompany]:
+        if not firm_urls:
+            return []
+
+        workers = max(1, settings.twogis_firm_workers)
+        workers = min(workers, len(firm_urls))
+        if use_proxy and proxy_manager.count > 0:
+            workers = min(workers, proxy_manager.count)
+
+        batches = [firm_urls[i::workers] for i in range(workers)]
+        max_retry_attempts = max(1, settings.twogis_company_retry_attempts)
+        tabs_per_browser = max(1, settings.twogis_tabs_per_browser)
+        tasks = [
+            self._scrape_firm_batch(
+                pw,
+                batch,
+                keyword,
+                use_proxy=use_proxy,
+                worker_idx=idx + 1,
+                tabs_per_browser=tabs_per_browser,
+                max_retry_attempts=max_retry_attempts,
+            )
+            for idx, batch in enumerate(batches)
+            if batch
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        out: list[RawCompany] = []
+        for res in results:
+            if isinstance(res, Exception):
+                log.warning("twogis.ui.batch_error", error=str(res))
+                continue
+            out.extend(res)
+        return out
+
+    async def _scrape_firm_batch(
+        self,
+        pw,
+        firm_urls: list[str],
+        keyword: str,
+        *,
+        use_proxy: bool,
+        worker_idx: int,
+        tabs_per_browser: int,
+        max_retry_attempts: int,
+    ) -> list[RawCompany]:
+        headless = not settings.twogis_debug_browser
+        pending_urls = list(firm_urls)
+        out: list[RawCompany] = []
+
+        total_attempts = max_retry_attempts + (1 if use_proxy else 0)
+        if use_proxy and settings.twogis_retry_until_success:
+            total_attempts = max(
+                total_attempts,
+                max_retry_attempts + max(1, settings.twogis_max_proxy_rotations),
+            )
+
+        proxy = None
+        for attempt in range(1, total_attempts + 1):
+            if not pending_urls:
+                break
+
+            is_direct_fallback = use_proxy and attempt > max_retry_attempts
+            proxy = None if is_direct_fallback else (proxy_manager.playwright_proxy() if use_proxy else None)
+            browser = await pw.chromium.launch(
+                headless=headless,
+                proxy=proxy,
+                slow_mo=300 if settings.twogis_debug_browser else 0,
+                args=["--no-sandbox", "--disable-dev-shm-usage"],
+            )
+            try:
+                context = await browser.new_context(
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0.0.0 Safari/537.36"
+                    ),
+                    locale="ru-RU",
+                )
+                sem = asyncio.Semaphore(tabs_per_browser)
+                next_pending: list[str] = []
+
+                async def _job(url: str) -> None:
+                    async with sem:
+                        company, retry_needed = await self._scrape_firm_page_status(context, url, keyword)
+                    if company:
+                        out.append(company)
+                    elif retry_needed:
+                        next_pending.append(url)
+
+                await asyncio.gather(*[_job(url) for url in pending_urls])
+                pending_urls = next_pending
+            finally:
+                await browser.close()
+
+            if pending_urls and attempt < total_attempts:
+                log.info(
+                    "twogis.ui.batch_retry",
+                    worker=worker_idx,
+                    attempt=attempt + 1,
+                    pending=len(pending_urls),
+                    proxy_mode="direct" if is_direct_fallback else "proxy",
+                    proxy=proxy.get("server") if proxy else None,
+                )
+                await asyncio.sleep(0.5)
+
+        log.info(
+            "twogis.ui.batch_done",
+            worker=worker_idx,
+            use_proxy=use_proxy,
+            proxy=proxy.get("server") if proxy else None,
+            parsed=len(out),
+            total=len(firm_urls),
+            unresolved=len(pending_urls),
+        )
+        return out
+
+    async def _scrape_firm_page_status(
+        self,
+        context,
+        url: str,
+        keyword: str,
+    ) -> tuple[RawCompany | None, bool]:
+        """Return (company, retry_needed)."""
         page = await context.new_page()
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=35_000)
-            await asyncio.sleep(0.7)
+            resp = await page.goto(url, wait_until="domcontentloaded", timeout=35_000)
+            await asyncio.sleep(0.5)
+            if resp and resp.status in (401, 403, 429, 503):
+                return None, True
             if "captcha.2gis.ru" in page.url:
-                return None
+                return None, True
             html = await page.content()
+            if _is_forbidden_html(html):
+                return None, True
         except Exception:
-            return None
+            return None, True
         finally:
             await page.close()
 
         soup = BeautifulSoup(html, "html.parser")
         name = _text(soup.select_one("h1")) or _extract_title_fallback(soup)
         if not name:
-            return None
+            return None, False
 
         source_id = _extract_firm_id(url)
         phones = _extract_phones(soup)
         addresses = _extract_addresses(soup)
         average_rating, reviews_count = _extract_rating_info(soup)
         websites = _extract_websites(soup)
+        reviews = await self._fetch_ui_reviews(source_id, html)
+        if reviews:
+            reviews_count = len(reviews)
+            ratings = [r.rating for r in reviews if r.rating is not None]
+            if ratings:
+                average_rating = round(sum(ratings) / len(ratings), 2)
 
-        return RawCompany(
+        company = RawCompany(
             source=self.source_name,
             source_id=source_id,
             source_link=url,
@@ -232,9 +431,53 @@ class TwoGisCollector(AbstractCollector):
             addresses=addresses,
             average_rating=average_rating,
             reviews_count=reviews_count,
+            reviews=reviews,
             contacts_json={"websites": websites},
             raw_payload={"keyword": keyword, "mode": "ui"},
         )
+        return company, False
+
+    async def _scrape_firm_page(self, context, url: str, keyword: str) -> RawCompany | None:
+        company, _ = await self._scrape_firm_page_status(context, url, keyword)
+        return company
+
+    async def _fetch_ui_reviews(self, source_id: str | None, page_html: str) -> list[RawReview]:
+        """Fetch review texts in UI mode using reviewApiKey embedded in page HTML."""
+        if not source_id:
+            return []
+        api_key = _extract_review_api_key_from_html(page_html)
+        if not api_key:
+            return []
+
+        params = {"key": api_key, "page_size": 50, "is_advertiser": "false"}
+        url = REVIEWS_URL.format(branch_id=source_id)
+        proxy_url = proxy_manager.get_next()
+        try:
+            async with httpx.AsyncClient(timeout=20.0, proxy=proxy_url or None) as client:
+                resp = await client.get(url, params=params)
+            if resp.status_code != 200:
+                return []
+            data = resp.json()
+        except Exception as exc:
+            log.debug("twogis.ui.reviews_error", source_id=source_id, error=str(exc))
+            return []
+
+        out: list[RawReview] = []
+        for r in data.get("reviews", []):
+            text = str(r.get("text") or "").strip()
+            if not text:
+                continue
+            rating = parse_float(str(r.get("rating", "")))
+            out.append(
+                RawReview(
+                    source=self.source_name,
+                    text=text,
+                    rating=rating,
+                    author=r.get("user", {}).get("name"),
+                    source_link=f"https://2gis.ru/omsk/firm/{source_id}/tab/reviews",
+                )
+            )
+        return out
 
     # ----------------------------------------------------------------- key capture (fallback)
 
@@ -261,16 +504,22 @@ class TwoGisCollector(AbstractCollector):
                 log.debug("twogis.key_capture.proxy_attempt_failed", attempt=attempt)
 
         key = await self._capture_api_key_once(use_proxy=False)
-        return key
+        if key:
+            return key
+        return None
 
     async def _capture_api_key_once(self, *, use_proxy: bool) -> str | None:
         captured: list[str] = []
 
         async with async_playwright() as pw:
             proxy = proxy_manager.playwright_proxy() if use_proxy else None
+            if use_proxy:
+                log.debug("twogis.key_capture.proxy_pick", proxy=proxy.get("server") if proxy else None)
+            headless = not settings.twogis_debug_browser
             browser = await pw.chromium.launch(
-                headless=True,
+                headless=headless,
                 proxy=proxy,
+                slow_mo=300 if settings.twogis_debug_browser else 0,
                 args=["--no-sandbox", "--disable-dev-shm-usage"],
             )
             try:
@@ -301,22 +550,26 @@ class TwoGisCollector(AbstractCollector):
                     for candidate in captured:
                         if await self._is_api_key_valid(candidate):
                             return candidate
+                        log.debug("twogis.api_key_invalid_candidate", source="request")
 
                 # Fallback: 2GIS often embeds the key in inline JSON/config.
                 try:
                     html = await page.content()
                     embedded = _extract_api_key_from_html(html)
-                    if embedded and await self._is_api_key_valid(embedded):
-                        log.info("twogis.api_key_embedded_found", use_proxy=use_proxy)
-                        return embedded
-                except Exception:
-                    pass
+                    if embedded:
+                        if await self._is_api_key_valid(embedded):
+                            log.info("twogis.api_key_embedded_found", use_proxy=use_proxy)
+                            return embedded
+                        log.debug("twogis.api_key_invalid_candidate", source="embedded")
+                except Exception as exc:
+                    log.debug("twogis.key_capture.content_error", error=str(exc), use_proxy=use_proxy)
             finally:
                 await browser.close()
 
         return None
 
     async def _is_api_key_valid(self, key: str) -> bool:
+        """Verify key against 2GIS catalog API."""
         params = {
             "q": "сантехник",
             "region_id": settings.twogis_region_id,
@@ -339,6 +592,8 @@ class TwoGisCollector(AbstractCollector):
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     async def _fetch_items(self, keyword: str, api_key: str) -> list[RawCompany]:
         proxy_url = proxy_manager.get_next()
+        if proxy_url:
+            log.debug("twogis.catalog.proxy_pick", proxy=proxy_url)
         async with httpx.AsyncClient(timeout=30.0, proxy=proxy_url or None) as client:
             params = {
                 "q": keyword,
@@ -485,6 +740,65 @@ def _extract_api_key_from_html(html: str) -> str | None:
     return None
 
 
+def _normalize_search_base(url: str, *, fallback: str) -> str:
+    base = url or fallback
+    if "/page/" in base:
+        base = re.sub(r"/page/\d+$", "", base)
+    return base or fallback
+
+
+def _extract_page_number(url: str) -> int:
+    m = re.search(r"/page/(\d+)", url or "")
+    return int(m.group(1)) if m else 1
+
+
+def _is_forbidden_html(html: str) -> bool:
+    low = (html or "").lower()
+    if "forbidden" not in low:
+        return False
+    return (
+        "if you are not a bot" in low
+        or "origin: https://2gis.ru" in low
+        or "support team" in low
+        or "copy the report" in low
+    )
+
+
+async def _detect_max_search_page(page) -> int:
+    """Try to read total number of search result pages from pagination controls."""
+    try:
+        candidates = await page.evaluate(
+            """() => {
+                const out = [];
+                for (const a of document.querySelectorAll('a[href*="/search/"]')) {
+                    const href = a.href ? a.href.split('?')[0] : '';
+                    const txt = (a.textContent || '').trim();
+                    out.push([href, txt]);
+                }
+                return out;
+            }"""
+        )
+    except Exception:
+        return 0
+
+    max_page = 1
+    for href, txt in candidates:
+        href_str = str(href or "")
+        txt_str = str(txt or "").strip()
+
+        m_href = re.search(r"/page/(\d+)", href_str)
+        if m_href:
+            max_page = max(max_page, int(m_href.group(1)))
+        if txt_str.isdigit():
+            max_page = max(max_page, int(txt_str))
+    return max_page
+
+
+def _extract_review_api_key_from_html(html: str) -> str | None:
+    m = re.search(r'"reviewApiKey"\s*:\s*"([^"]+)"', html)
+    return m.group(1) if m else None
+
+
 def _extract_firm_id(url: str) -> str | None:
     m = re.search(r"/firm/(\d+)", url)
     return m.group(1) if m else None
@@ -533,9 +847,22 @@ def _extract_addresses(soup: BeautifulSoup) -> list[str]:
                 str(addr.get("streetAddress") or "").strip(),
             ]
             merged = ", ".join([p for p in parts if p])
-            if merged and merged not in seen:
-                seen.add(merged)
-                addrs.append(merged)
+            _append_unique_address(addrs, seen, merged)
+
+    # 2GIS UI block: street link + district/city/index in sibling div (from Andrey).
+    for a in soup.select('a[href*="/geo/"]'):
+        street = _text(a)
+        if not street:
+            continue
+
+        extra = None
+        span = a.find_parent("span")
+        if span:
+            sibling = span.find_next_sibling("div")
+            extra = _text(sibling)
+
+        merged = f"{street}, {extra}" if extra else street
+        _append_unique_address(addrs, seen, merged)
 
     candidates = []
     candidates.extend(soup.select('a[href*="/geo/"]'))
@@ -544,12 +871,26 @@ def _extract_addresses(soup: BeautifulSoup) -> list[str]:
 
     for el in candidates:
         txt = _text(el)
-        if not txt or len(txt) < 6:
+        if not txt:
             continue
-        if txt not in seen:
-            seen.add(txt)
-            addrs.append(txt)
+        _append_unique_address(addrs, seen, txt)
     return addrs[:3]
+
+
+def _append_unique_address(addrs: list[str], seen: set[str], value: str | None) -> None:
+    if not value:
+        return
+    txt = " ".join(str(value).replace("\xa0", " ").split()).strip(" ,")
+    if not txt:
+        return
+    if len(txt) < 6:
+        return
+    lower = txt.lower()
+    if "показать вход" in lower:
+        return
+    if txt not in seen:
+        seen.add(txt)
+        addrs.append(txt)
 
 
 def _extract_websites(soup: BeautifulSoup) -> list[str]:
@@ -579,7 +920,7 @@ def _extract_rating_info(soup: BeautifulSoup) -> tuple[float | None, int | None]
         if rating or count:
             return rating, count
 
-    # 2) Try meta tags.
+    # 2) Try meta tags (from Denis).
     meta_rating = soup.find("meta", attrs={"itemprop": "ratingValue"})
     meta_count = soup.find("meta", attrs={"itemprop": "reviewCount"})
     if meta_rating or meta_count:
@@ -588,24 +929,18 @@ def _extract_rating_info(soup: BeautifulSoup) -> tuple[float | None, int | None]
         if rating or count:
             return rating, count
 
-    # 3) Try rating-related elements by class/itemprop (targeted, not full page text).
+    # 3) Fallback from page text (targeted patterns only, from Andrey).
+    text = soup.get_text(" ", strip=True)
     rating = None
     count = None
-    for el in soup.select('[class*="rating"], [itemprop="ratingValue"]'):
-        txt = _text(el)
-        if txt and len(txt) < 20:
-            r = parse_float(txt)
-            if r is not None and 0 < r <= 5:
-                rating = r
-                break
 
-    for el in soup.select('[class*="review"], [class*="comment"], [itemprop="reviewCount"]'):
-        txt = _text(el)
-        if txt and len(txt) < 30:
-            c = parse_int(txt)
-            if c is not None and 0 < c < 1_000_000:
-                count = c
-                break
+    m_rating = re.search(r"([1-5][\.,]\d)\s*(?:из|/)\s*5", text, flags=re.IGNORECASE)
+    if m_rating:
+        rating = parse_float(m_rating.group(1))
+
+    m_count = re.search(r"(?<!\d)(\d{1,6})\s+отзыв", text, flags=re.IGNORECASE)
+    if m_count:
+        count = parse_int(m_count.group(1))
 
     return rating, count
 
