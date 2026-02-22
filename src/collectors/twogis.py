@@ -25,6 +25,22 @@ REVIEWS_URL = "https://public-api.reviews.2gis.com/2.0/branches/{branch_id}/revi
 _HOME_PAGE = "https://2gis.ru/omsk"
 _SEARCH_URL = "https://2gis.ru/omsk/search/{query}"
 
+# Крупные населённые пункты Омской области (добавляются к запросу для расширения поиска)
+_REGION_LOCALITIES = [
+    "Тара",
+    "Исилькуль",
+    "Калачинск",
+    "Называевск",
+    "Тюкалинск",
+    "Таврическое",
+    "Любинский",
+    "Москаленки",
+    "Марьяновка",
+    "Кормиловка",
+    "Нижняя Омка",
+    "Большеречье",
+]
+
 
 class TwoGisCollector(AbstractCollector):
     source_name = "2gis"
@@ -38,21 +54,40 @@ class TwoGisCollector(AbstractCollector):
     async def collect(self, keyword: str) -> list[RawCompany]:
         log.info("twogis.collect.start", keyword=keyword)
 
-        # Primary: scrape public web UI (no API key needed).
+        all_companies: list[RawCompany] = []
+        seen_ids: set[str] = set()
+
+        def _dedup_extend(companies: list[RawCompany]) -> int:
+            added = 0
+            for c in companies:
+                if c.source_id and c.source_id in seen_ids:
+                    continue
+                if c.source_id:
+                    seen_ids.add(c.source_id)
+                all_companies.append(c)
+                added += 1
+            return added
+
+        # 1. Primary: search in Omsk city
         companies = await self._collect_via_ui(keyword)
-        if companies:
-            log.info("twogis.collect.done", keyword=keyword, count=len(companies), mode="ui")
-            return companies
+        if not companies:
+            api_key = await self._ensure_api_key()
+            if api_key:
+                companies = await self._fetch_items(keyword, api_key)
+        _dedup_extend(companies)
 
-        # Fallback: try captured/configured API key.
-        api_key = await self._ensure_api_key()
-        if not api_key:
-            log.warning("twogis.collect.skip", reason="ui_empty_and_no_api_key")
-            return []
+        # 2. Regional: search with locality names appended to the keyword
+        if settings.twogis_search_region:
+            for locality in _REGION_LOCALITIES:
+                regional_kw = f"{keyword} {locality}"
+                regional = await self._collect_via_ui(regional_kw)
+                added = _dedup_extend(regional)
+                if added:
+                    log.info("twogis.collect.region", keyword=keyword, locality=locality, added=added)
 
-        companies = await self._fetch_items(keyword, api_key)
-        log.info("twogis.collect.done", keyword=keyword, count=len(companies), mode="api")
-        return companies
+        log.info("twogis.collect.done", keyword=keyword, count=len(all_companies),
+                 regional=settings.twogis_search_region)
+        return all_companies
 
     # ----------------------------------------------------------------- UI scraping
 

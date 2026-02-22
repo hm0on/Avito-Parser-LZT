@@ -54,6 +54,8 @@ class Settings(BaseSettings):
 
     # 2GIS (optional explicit API key, otherwise auto-captured from page)
     twogis_api_key: str = Field(default="", alias="TWOGIS_API_KEY")
+    # Искать по всей Омской области (+ районные города), а не только по Омску
+    twogis_search_region: bool = Field(default=True, alias="TWOGIS_SEARCH_REGION")
 
     # Region
     region: str = "Омск"
