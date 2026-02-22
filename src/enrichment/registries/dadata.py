@@ -19,6 +19,7 @@ class DaDataChecker(AbstractChecker):
         inn: str | None = None,
         ogrn: str | None = None,
         name: str | None = None,
+        extra: dict | None = None,
     ) -> CheckResult:
         query = inn or ogrn
         if not query:
@@ -34,7 +35,7 @@ class DaDataChecker(AbstractChecker):
             "X-Secret": settings.dadata_secret_key,
         }
 
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
                 DADATA_SUGGEST_URL,
                 json={"query": query, "count": 1},

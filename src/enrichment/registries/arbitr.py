@@ -20,6 +20,7 @@ class ArbitrChecker(AbstractChecker):
         inn: str | None = None,
         ogrn: str | None = None,
         name: str | None = None,
+        extra: dict | None = None,
     ) -> CheckResult:
         if not inn and not ogrn:
             return CheckResult(registry=self.registry_name, found=False, error="INN or OGRN required")

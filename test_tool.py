@@ -10,6 +10,7 @@
     python test_tool.py website https://example.ru       # Сканирование сайта
     python test_tool.py fssp --inn 5503098042            # ФССП по ИНН
     python test_tool.py fssp --name "ООО Ромашка"        # ФССП по имени
+    python test_tool.py registries 5503098042              # Все 13 реестров по ИНН
     python test_tool.py enrich twogis -k "монтаж"        # Collect 1 + enrich
     python test_tool.py all                              # Все тесты разом
 """
@@ -109,6 +110,8 @@ async def cmd_collector(source: str, keyword: str) -> bool:
         if not companies:
             print(f"  {fail('0 компаний получено')}")
             print(f"  {dim(f'Время: {elapsed:.1f}s')}")
+            if source == "avito":
+                print(f"  {warn('Авито блокирует запросы без прокси (429). Нужен резидентный прокси или spfa.ru cookies.')}")
             return False
 
         print(f"  {ok(f'{len(companies)} компаний за {elapsed:.1f}s')}")
@@ -169,12 +172,14 @@ async def cmd_inn(query: str) -> bool:
             kwargs["name"] = query
             print(f"  Тип запроса: поиск по имени")
 
-        result = await checker.check(**kwargs)
+        result = await checker.safe_check(**kwargs)
         elapsed = time.monotonic() - t0
 
         print(f"  {dim(f'Время: {elapsed:.1f}s')}")
         print()
         _print_check_result(result)
+        if result.error:
+            print(f"\n  {warn('Подсказка: проверьте DADATA_API_KEY/DADATA_SECRET_KEY в .env и доступ к suggestions.dadata.ru')}")
         return result.found
 
     except Exception as exc:
@@ -244,18 +249,23 @@ async def cmd_fssp(inn: str | None = None, name: str | None = None) -> bool:
     try:
         from src.enrichment.registries.fssp import FsspChecker
         checker = FsspChecker()
-        result = await checker.check(inn=inn, name=name)
+        result = await checker.safe_check(inn=inn, name=name)
         elapsed = time.monotonic() - t0
 
         print(f"  {dim(f'Время: {elapsed:.1f}s')}")
         print()
         _print_check_result(result)
 
-        if result.error and "captcha" in (result.error or "").lower():
-            print(f"\n  {warn('CAPTCHA — Playwright fallback (это нормально)')}")
-            return True
+        if result.error:
+            err_lower = result.error.lower()
+            if "captcha" in err_lower:
+                print(f"\n  {warn('CAPTCHA — нужен прокси или ручное решение')}")
+            elif "could not parse" in err_lower:
+                print(f"\n  {warn('ФССП ставит CAPTCHA на GET-запрос. httpx не может обойти, Playwright тоже не смог.')}")
+                print(f"  {warn('Решение: использовать резидентный прокси или CAPTCHA-solver.')}")
+            return False
 
-        return not result.error
+        return True
 
     except Exception as exc:
         elapsed = time.monotonic() - t0
@@ -362,6 +372,118 @@ async def cmd_enrich(source: str, keyword: str) -> bool:
         return False
 
 
+# ── All registries check by INN ───────────────────────────────────────────────
+
+async def cmd_registries(query: str) -> bool:
+    """Run ALL 13 registry checkers on a given INN/OGRN."""
+    print(head(f"Все реестры — проверка «{query}»"))
+
+    # Determine INN vs OGRN
+    inn, ogrn = None, None
+    if len(query) in (10, 12):
+        inn = query
+        print(f"  Тип: ИНН ({len(query)} цифр)")
+    elif len(query) in (13, 15):
+        ogrn = query
+        print(f"  Тип: ОГРН ({len(query)} цифр)")
+    else:
+        inn = query
+        print(f"  Тип: неизвестный, пробуем как ИНН")
+
+    t0 = time.monotonic()
+    try:
+        from src.enrichment.enricher import _PASS1_CHECKERS, _PASS2_CHECKERS
+        import asyncio as _aio
+
+        # Pass 1
+        print(f"\n  {cyan('Pass 1:')} {len(_PASS1_CHECKERS)} чекеров...")
+        results = await _aio.gather(
+            *[c.safe_check(inn=inn, ogrn=ogrn) for c in _PASS1_CHECKERS]
+        )
+
+        checks = {}
+        for r in results:
+            checks[r.registry] = r
+
+        # Show pass 1 results
+        for r in results:
+            if r.error:
+                print(f"    {fail(r.registry)}: {r.error}")
+            elif r.found:
+                print(f"    {ok(r.registry)}: {r.status or 'found'}")
+            else:
+                print(f"    {dim(f'— {r.registry}: не найдено')}")
+
+        # Extract data for pass 2
+        director_fio = ""
+        legal_address = ""
+
+        pb = checks.get("fns_pb")
+        if pb and pb.found:
+            director_fio = pb.details.get("head_fio", "")
+            legal_address = pb.details.get("address", "")
+
+        dd = checks.get("dadata_fns")
+        if dd and dd.found:
+            if not director_fio and dd.details.get("entity_type") == "ИП":
+                director_fio = dd.details.get("name", "")
+            if not legal_address:
+                legal_address = dd.details.get("address", "")
+
+        # Pass 2
+        if director_fio or legal_address:
+            print(f"\n  {cyan('Pass 2:')} {len(_PASS2_CHECKERS)} чекеров...")
+            if director_fio:
+                print(f"    Директор: {director_fio}")
+            if legal_address:
+                print(f"    Адрес: {legal_address[:60]}...")
+
+            extra = {"director_fio": director_fio, "legal_address": legal_address}
+            pass2_results = await _aio.gather(
+                *[c.safe_check(inn=inn, ogrn=ogrn, extra=extra) for c in _PASS2_CHECKERS]
+            )
+            for r in pass2_results:
+                checks[r.registry] = r
+                if r.error:
+                    print(f"    {fail(r.registry)}: {r.error}")
+                elif r.found:
+                    print(f"    {ok(r.registry)}: {r.status or 'found'}")
+                else:
+                    print(f"    {dim(f'— {r.registry}: не найдено')}")
+        else:
+            print(f"\n  {dim('Pass 2 пропущен: нет данных о директоре/адресе из pass 1')}")
+
+        elapsed = time.monotonic() - t0
+
+        # Summary with details
+        print(f"\n  {BOLD}Итого: {len(checks)} реестров за {elapsed:.1f}s{RESET}")
+        found_count = sum(1 for r in checks.values() if r.found)
+        error_count = sum(1 for r in checks.values() if r.error)
+        print(f"    Найдено: {found_count}, Ошибки: {error_count}")
+
+        # Show detailed results for found items
+        for name, r in checks.items():
+            if r.found and r.details:
+                print(f"\n    {BOLD}{name}{RESET} ({r.status}):")
+                for k, v in r.details.items():
+                    if isinstance(v, list) and len(v) > 3:
+                        print(f"      {k}: [{len(v)} items]")
+                    elif isinstance(v, str) and len(v) > 80:
+                        print(f"      {k}: {v[:80]}…")
+                    else:
+                        print(f"      {k}: {v}")
+
+        return found_count > 0
+
+    except Exception as exc:
+        elapsed = time.monotonic() - t0
+        print(f"  {fail(str(exc))}")
+        print(f"  {dim(f'Время: {elapsed:.1f}s')}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 # ── All tests ────────────────────────────────────────────────────────────────
 
 async def cmd_all(keyword: str) -> None:
@@ -380,6 +502,10 @@ async def cmd_all(keyword: str) -> None:
     # DaData
     success = await cmd_inn("5503098042")
     results.append(("dadata/inn", success))
+
+    # All registries by INN
+    success = await cmd_registries("5503098042")
+    results.append(("registries", success))
 
     # FSSP
     success = await cmd_fssp(name="Рога и Копыта")
@@ -411,6 +537,7 @@ def build_parser() -> argparse.ArgumentParser:
   python test_tool.py inn 5503098042                 # DaData по ИНН
   python test_tool.py website https://example.ru     # Сканирование сайта
   python test_tool.py fssp --inn 5503098042          # ФССП по ИНН
+  python test_tool.py registries 5503098042          # Все 13 реестров по ИНН
   python test_tool.py enrich twogis                  # Collect + enrich
   python test_tool.py all                            # Все тесты
 """,
@@ -439,6 +566,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_enrich = sub.add_parser("enrich", help="Collect + enrich одной компании")
     p_enrich.add_argument("source", choices=["yandex", "twogis", "avito"], help="Источник для сбора")
     p_enrich.add_argument("-k", "--keyword", default=DEFAULT_KEYWORD, help="Ключевое слово для поиска")
+
+    # Registries (all 13 checkers by INN)
+    p_reg = sub.add_parser("registries", help="Проверка всех 13 реестров по ИНН/ОГРН")
+    p_reg.add_argument("query", help="ИНН (10/12 цифр) или ОГРН (13/15 цифр)")
 
     # All
     p_all = sub.add_parser("all", help="Запуск всех тестов")
@@ -475,6 +606,10 @@ async def main() -> int:
 
     if cmd == "enrich":
         success = await cmd_enrich(args.source, args.keyword)
+        return 0 if success else 1
+
+    if cmd == "registries":
+        success = await cmd_registries(args.query)
         return 0 if success else 1
 
     if cmd == "all":
