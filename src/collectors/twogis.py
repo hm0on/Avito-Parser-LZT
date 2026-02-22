@@ -451,15 +451,27 @@ class TwoGisCollector(AbstractCollector):
 
         params = {"key": api_key, "page_size": 50, "is_advertiser": "false"}
         url = REVIEWS_URL.format(branch_id=source_id)
+        # Try with proxy first, fallback to direct if 407/proxy error
         proxy_url = proxy_manager.get_next()
-        try:
-            async with httpx.AsyncClient(timeout=20.0, proxy=proxy_url or None) as client:
-                resp = await client.get(url, params=params)
-            if resp.status_code != 200:
+        data = None
+        for attempt_proxy in (proxy_url, None):
+            try:
+                async with httpx.AsyncClient(timeout=20.0, proxy=attempt_proxy or None) as client:
+                    resp = await client.get(url, params=params)
+                if resp.status_code == 407:
+                    # Proxy auth failed — retry without proxy
+                    continue
+                if resp.status_code != 200:
+                    return []
+                data = resp.json()
+                break
+            except Exception as exc:
+                if attempt_proxy:
+                    # Proxy failed — try direct
+                    continue
+                log.debug("twogis.ui.reviews_error", source_id=source_id, error=str(exc))
                 return []
-            data = resp.json()
-        except Exception as exc:
-            log.debug("twogis.ui.reviews_error", source_id=source_id, error=str(exc))
+        if data is None:
             return []
 
         out: list[RawReview] = []
