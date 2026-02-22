@@ -1,4 +1,4 @@
-"""Yandex Maps collector — Playwright scraper."""
+"""Yandex Maps collector — Playwright scraper with proxy retry."""
 
 import asyncio
 import re
@@ -6,7 +6,7 @@ from urllib.parse import quote_plus
 
 import structlog
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, stop_after_attempt, wait_exponential, RetryError
 
 from src.collectors.base import AbstractCollector, RawCompany, RawReview, parse_float, parse_int
 from src.config import settings
@@ -24,20 +24,39 @@ class YandexCollector(AbstractCollector):
         url = f"{YANDEX_MAPS_BASE}?text={quote_plus(keyword)}"
         log.info("yandex.collect.start", keyword=keyword, url=url)
 
-        async with async_playwright() as pw:
-            browser = await self._launch_browser(pw)
+        companies: list[RawCompany] = []
+
+        # Try with proxy first.
+        if proxy_manager.count > 0:
             try:
-                context = await self._new_context(browser)
-                page = await context.new_page()
-                companies = await self._scrape_listing(page, url, keyword)
-            finally:
-                await browser.close()
+                companies = await self._collect_once(url, keyword, use_proxy=True)
+            except Exception as exc:
+                log.warning("yandex.collect.with_proxy_error", error=_exc_detail(exc))
+
+        # Retry without proxy if no results.
+        if not companies:
+            log.info("yandex.collect.retry_without_proxy")
+            try:
+                companies = await self._collect_once(url, keyword, use_proxy=False)
+            except Exception as exc:
+                log.warning("yandex.collect.without_proxy_error", error=_exc_detail(exc))
+                companies = []
 
         log.info("yandex.collect.done", keyword=keyword, count=len(companies))
         return companies
 
-    async def _launch_browser(self, pw) -> Browser:
-        proxy = proxy_manager.playwright_proxy()
+    async def _collect_once(self, url: str, keyword: str, *, use_proxy: bool) -> list[RawCompany]:
+        async with async_playwright() as pw:
+            browser = await self._launch_browser(pw, use_proxy=use_proxy)
+            try:
+                context = await self._new_context(browser)
+                page = await context.new_page()
+                return await self._scrape_listing(page, url, keyword)
+            finally:
+                await browser.close()
+
+    async def _launch_browser(self, pw, *, use_proxy: bool) -> Browser:
+        proxy = proxy_manager.playwright_proxy() if use_proxy else None
         return await pw.chromium.launch(
             headless=True,
             proxy=proxy,
@@ -74,8 +93,8 @@ class YandexCollector(AbstractCollector):
                 await sidebar.evaluate("el => el.scrollBy(0, 400)")
                 await asyncio.sleep(0.8)
 
-        # Collect listing cards
-        cards = await page.query_selector_all("[class*='search-snippet']")
+        # Collect listing cards (Yandex frequently renames CSS classes)
+        cards = await self._find_cards(page)
         log.info("yandex.listing.cards_found", count=len(cards), keyword=keyword)
 
         companies: list[RawCompany] = []
@@ -88,6 +107,27 @@ class YandexCollector(AbstractCollector):
                 log.warning("yandex.card.parse_error", error=str(exc))
 
         return companies
+
+    async def _find_cards(self, page: Page):
+        """Try multiple CSS selectors — Yandex often renames class prefixes."""
+        selectors = [
+            "[class*='search-snippet']",
+            "[class*='search-business-snippet-view']",
+            "[class*='search-business-snippet']",
+            "[class*='search-snippet-view']",
+        ]
+        for selector in selectors:
+            cards = await page.query_selector_all(selector)
+            if cards:
+                return cards
+
+        # Extra wait for slow rendering
+        await asyncio.sleep(2)
+        for selector in selectors:
+            cards = await page.query_selector_all(selector)
+            if cards:
+                return cards
+        return []
 
     async def _parse_card(self, page: Page, card, keyword: str) -> RawCompany | None:
         name_el = await card.query_selector("[class*='orgcard-header__name']")
@@ -150,3 +190,12 @@ class YandexCollector(AbstractCollector):
         ) if name_raw else None
 
 
+def _exc_detail(exc: Exception) -> str:
+    if isinstance(exc, RetryError):
+        try:
+            inner = exc.last_attempt.exception()
+            if inner:
+                return f"RetryError -> {type(inner).__name__}: {inner}"
+        except Exception:
+            pass
+    return str(exc)

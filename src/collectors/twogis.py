@@ -1,16 +1,19 @@
-"""2GIS scraper — captures the embedded API key via Playwright, then uses catalog API."""
+"""2GIS scraper — primary: Playwright UI scraping, fallback: captured API key."""
 
 from __future__ import annotations
 
 import asyncio
-from urllib.parse import urlparse, parse_qs
+import json
+import re
+from urllib.parse import parse_qs, quote_plus, urlparse
 
 import httpx
 import structlog
+from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from src.collectors.base import AbstractCollector, RawCompany, RawReview
+from src.collectors.base import AbstractCollector, RawCompany, RawReview, parse_float, parse_int
 from src.config import settings
 from src.proxy import proxy_manager
 
@@ -20,6 +23,7 @@ CATALOG_HOST = "catalog.api.2gis.com"
 CATALOG_URL = f"https://{CATALOG_HOST}/3.0/items"
 REVIEWS_URL = "https://public-api.reviews.2gis.com/2.0/branches/{branch_id}/reviews"
 _HOME_PAGE = "https://2gis.ru/omsk"
+_SEARCH_URL = "https://2gis.ru/omsk/search/{query}"
 
 
 class TwoGisCollector(AbstractCollector):
@@ -33,18 +37,174 @@ class TwoGisCollector(AbstractCollector):
     async def collect(self, keyword: str) -> list[RawCompany]:
         log.info("twogis.collect.start", keyword=keyword)
 
+        # Primary: scrape public web UI (no API key needed).
+        companies = await self._collect_via_ui(keyword)
+        if companies:
+            log.info("twogis.collect.done", keyword=keyword, count=len(companies), mode="ui")
+            return companies
+
+        # Fallback: try captured/configured API key.
         api_key = await self._ensure_api_key()
         if not api_key:
-            log.warning("twogis.collect.skip", reason="could not obtain embedded API key")
+            log.warning("twogis.collect.skip", reason="ui_empty_and_no_api_key")
             return []
 
         companies = await self._fetch_items(keyword, api_key)
-        log.info("twogis.collect.done", keyword=keyword, count=len(companies))
+        log.info("twogis.collect.done", keyword=keyword, count=len(companies), mode="api")
         return companies
 
-    # ----------------------------------------------------------------- key capture
+    # ----------------------------------------------------------------- UI scraping
+
+    async def _collect_via_ui(self, keyword: str) -> list[RawCompany]:
+        query = quote_plus(keyword)
+        search_url = _SEARCH_URL.format(query=query)
+
+        # Try proxies first, then direct.
+        use_proxy_attempts = min(3, proxy_manager.count) if proxy_manager.count > 0 else 0
+        for _ in range(use_proxy_attempts):
+            companies = await self._collect_via_ui_once(keyword, search_url, use_proxy=True)
+            if companies:
+                return companies
+        return await self._collect_via_ui_once(keyword, search_url, use_proxy=False)
+
+    async def _collect_via_ui_once(
+        self,
+        keyword: str,
+        search_url: str,
+        *,
+        use_proxy: bool,
+    ) -> list[RawCompany]:
+        async with async_playwright() as pw:
+            proxy = proxy_manager.playwright_proxy() if use_proxy else None
+            browser = await pw.chromium.launch(
+                headless=True,
+                proxy=proxy,
+                args=["--no-sandbox", "--disable-dev-shm-usage"],
+            )
+            try:
+                context = await browser.new_context(
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0.0.0 Safari/537.36"
+                    ),
+                    locale="ru-RU",
+                )
+                page = await context.new_page()
+                try:
+                    await page.goto(search_url, wait_until="domcontentloaded", timeout=45_000)
+                    await asyncio.sleep(2)
+                except Exception as exc:
+                    log.warning("twogis.ui.goto_error", error=str(exc), use_proxy=use_proxy)
+                    return []
+
+                if "captcha.2gis.ru" in page.url:
+                    log.warning("twogis.ui.captcha", use_proxy=use_proxy)
+                    return []
+
+                firm_urls = await self._collect_firm_urls(page)
+                if not firm_urls:
+                    log.info("twogis.ui.no_firms", use_proxy=use_proxy)
+                    return []
+
+                out: list[RawCompany] = []
+                for url in firm_urls[:120]:
+                    company = await self._scrape_firm_page(context, url, keyword)
+                    if company:
+                        out.append(company)
+                    await asyncio.sleep(0.2)
+                return out
+            finally:
+                await browser.close()
+
+    async def _collect_firm_urls(self, page) -> list[str]:
+        """Scroll search page and collect unique /firm/{id} links."""
+        urls: list[str] = []
+        seen: set[str] = set()
+        stable_rounds = 0
+
+        for _ in range(30):
+            found = await page.evaluate(
+                """() => {
+                    const out = [];
+                    for (const a of document.querySelectorAll('a[href*="/firm/"]')) {
+                        if (!a.href) continue;
+                        const clean = a.href.split('?')[0];
+                        if (/\\/firm\\/\\d+/.test(clean)) out.push(clean);
+                    }
+                    return out;
+                }"""
+            )
+            added = 0
+            for u in found:
+                if u not in seen:
+                    seen.add(u)
+                    urls.append(u)
+                    added += 1
+
+            await page.evaluate(
+                """() => {
+                    window.scrollBy(0, 1400);
+                    for (const el of document.querySelectorAll('div')) {
+                        if (el.scrollHeight > el.clientHeight && el.clientHeight > 200) {
+                            el.scrollTop += 1000;
+                        }
+                    }
+                }"""
+            )
+            await asyncio.sleep(0.8)
+
+            if added == 0:
+                stable_rounds += 1
+            else:
+                stable_rounds = 0
+            if stable_rounds >= 4:
+                break
+
+        return urls
+
+    async def _scrape_firm_page(self, context, url: str, keyword: str) -> RawCompany | None:
+        page = await context.new_page()
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=35_000)
+            await asyncio.sleep(0.7)
+            if "captcha.2gis.ru" in page.url:
+                return None
+            html = await page.content()
+        except Exception:
+            return None
+        finally:
+            await page.close()
+
+        soup = BeautifulSoup(html, "html.parser")
+        name = _text(soup.select_one("h1")) or _extract_title_fallback(soup)
+        if not name:
+            return None
+
+        source_id = _extract_firm_id(url)
+        phones = _extract_phones(soup)
+        addresses = _extract_addresses(soup)
+        average_rating, reviews_count = _extract_rating_info(soup)
+        websites = _extract_websites(soup)
+
+        return RawCompany(
+            source=self.source_name,
+            source_id=source_id,
+            source_link=url,
+            name_raw=name,
+            phones=phones,
+            addresses=addresses,
+            average_rating=average_rating,
+            reviews_count=reviews_count,
+            contacts_json={"websites": websites},
+            raw_payload={"keyword": keyword, "mode": "ui"},
+        )
+
+    # ----------------------------------------------------------------- key capture (fallback)
 
     async def _ensure_api_key(self) -> str | None:
+        if settings.twogis_api_key:
+            return settings.twogis_api_key
         if TwoGisCollector._api_key:
             return TwoGisCollector._api_key
 
@@ -55,11 +215,23 @@ class TwoGisCollector(AbstractCollector):
         return key
 
     async def _capture_api_key(self) -> str | None:
-        """Open 2gis.ru with Playwright and intercept catalog API requests to extract the key."""
+        """Open 2GIS and obtain API key from requests or embedded page state."""
+        if proxy_manager.count > 0:
+            proxy_attempts = min(3, proxy_manager.count)
+            for attempt in range(1, proxy_attempts + 1):
+                key = await self._capture_api_key_once(use_proxy=True)
+                if key:
+                    return key
+                log.debug("twogis.key_capture.proxy_attempt_failed", attempt=attempt)
+
+        key = await self._capture_api_key_once(use_proxy=False)
+        return key
+
+    async def _capture_api_key_once(self, *, use_proxy: bool) -> str | None:
         captured: list[str] = []
 
         async with async_playwright() as pw:
-            proxy = proxy_manager.playwright_proxy()
+            proxy = proxy_manager.playwright_proxy() if use_proxy else None
             browser = await pw.chromium.launch(
                 headless=True,
                 proxy=proxy,
@@ -84,20 +256,54 @@ class TwoGisCollector(AbstractCollector):
                 page.on("request", _on_request)
 
                 try:
-                    await page.goto(_HOME_PAGE, wait_until="networkidle", timeout=45_000)
-                    await asyncio.sleep(2)
+                    await page.goto(_HOME_PAGE, wait_until="domcontentloaded", timeout=45_000)
+                    await asyncio.sleep(3)
                 except Exception as exc:
-                    log.warning("twogis.key_capture.error", error=str(exc))
+                    log.warning("twogis.key_capture.error", error=str(exc), use_proxy=use_proxy)
+
+                if captured:
+                    for candidate in captured:
+                        if await self._is_api_key_valid(candidate):
+                            return candidate
+
+                # Fallback: 2GIS often embeds the key in inline JSON/config.
+                try:
+                    html = await page.content()
+                    embedded = _extract_api_key_from_html(html)
+                    if embedded and await self._is_api_key_valid(embedded):
+                        log.info("twogis.api_key_embedded_found", use_proxy=use_proxy)
+                        return embedded
+                except Exception:
+                    pass
             finally:
                 await browser.close()
 
-        return captured[0] if captured else None
+        return None
 
-    # ----------------------------------------------------------------- data fetching
+    async def _is_api_key_valid(self, key: str) -> bool:
+        params = {
+            "q": "сантехник",
+            "region_id": settings.twogis_region_id,
+            "key": key,
+            "page_size": 1,
+            "type": "branch",
+        }
+        proxy_url = proxy_manager.get_next()
+        try:
+            async with httpx.AsyncClient(timeout=12.0, proxy=proxy_url or None) as client:
+                resp = await client.get(CATALOG_URL, params=params)
+            data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+            meta_code = data.get("meta", {}).get("code")
+            return resp.status_code == 200 and meta_code not in (401, 403)
+        except Exception:
+            return False
+
+    # ----------------------------------------------------------------- API data fetching (fallback)
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     async def _fetch_items(self, keyword: str, api_key: str) -> list[RawCompany]:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        proxy_url = proxy_manager.get_next()
+        async with httpx.AsyncClient(timeout=30.0, proxy=proxy_url or None) as client:
             params = {
                 "q": keyword,
                 "region_id": settings.twogis_region_id,
@@ -114,7 +320,6 @@ class TwoGisCollector(AbstractCollector):
                 params["page"] = page
                 resp = await client.get(CATALOG_URL, params=params)
 
-                # If our captured key has expired, clear cache so next call re-captures it
                 if resp.status_code in (401, 403):
                     TwoGisCollector._api_key = None
                     log.warning("twogis.api_key_expired", status=resp.status_code)
@@ -122,6 +327,11 @@ class TwoGisCollector(AbstractCollector):
 
                 resp.raise_for_status()
                 data = resp.json()
+                meta_code = data.get("meta", {}).get("code")
+                if meta_code in (401, 403):
+                    TwoGisCollector._api_key = None
+                    log.warning("twogis.api_key_invalid", meta_code=meta_code)
+                    return []
 
                 items = data.get("result", {}).get("items", [])
                 if not items:
@@ -221,3 +431,137 @@ class TwoGisCollector(AbstractCollector):
                 )
             )
         return reviews
+
+
+# ── HTML parsing helpers ─────────────────────────────────────────────────────
+
+
+def _extract_api_key_from_html(html: str) -> str | None:
+    patterns = [
+        r'"apiKey"\s*:\s*"([^"]+)"',
+        r'"key"\s*:\s*"([a-zA-Z0-9._-]{20,})"',
+        r'key=([a-zA-Z0-9._-]{20,})',
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, html)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _extract_firm_id(url: str) -> str | None:
+    m = re.search(r"/firm/(\d+)", url)
+    return m.group(1) if m else None
+
+
+def _text(el) -> str | None:
+    if not el:
+        return None
+    txt = el.get_text(" ", strip=True)
+    return txt or None
+
+
+def _extract_title_fallback(soup: BeautifulSoup) -> str | None:
+    meta = soup.find("meta", attrs={"property": "og:title"})
+    if meta and meta.get("content"):
+        return str(meta["content"]).strip()
+    if soup.title and soup.title.string:
+        return soup.title.string.strip()
+    return None
+
+
+def _extract_phones(soup: BeautifulSoup) -> list[str]:
+    phones: list[str] = []
+    seen: set[str] = set()
+    for a in soup.select('a[href^="tel:"]'):
+        href = a.get("href", "").replace("tel:", "").strip()
+        cleaned = re.sub(r"[^\d+]", "", href)
+        if cleaned.startswith("8") and len(cleaned) == 11:
+            cleaned = "+7" + cleaned[1:]
+        if cleaned and sum(ch.isdigit() for ch in cleaned) >= 10 and cleaned not in seen:
+            seen.add(cleaned)
+            phones.append(cleaned)
+    return phones
+
+
+def _extract_addresses(soup: BeautifulSoup) -> list[str]:
+    addrs: list[str] = []
+    seen: set[str] = set()
+
+    # JSON-LD is the most stable source for address fields.
+    for item in _extract_ld_json_items(soup):
+        addr = item.get("address")
+        if isinstance(addr, dict):
+            parts = [
+                str(addr.get("addressLocality") or "").strip(),
+                str(addr.get("streetAddress") or "").strip(),
+            ]
+            merged = ", ".join([p for p in parts if p])
+            if merged and merged not in seen:
+                seen.add(merged)
+                addrs.append(merged)
+
+    candidates = []
+    candidates.extend(soup.select('a[href*="/geo/"]'))
+    candidates.extend(soup.select('[itemprop="streetAddress"]'))
+    candidates.extend(soup.select('[class*="address"]'))
+
+    for el in candidates:
+        txt = _text(el)
+        if not txt or len(txt) < 6:
+            continue
+        if txt not in seen:
+            seen.add(txt)
+            addrs.append(txt)
+    return addrs[:3]
+
+
+def _extract_websites(soup: BeautifulSoup) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for a in soup.select("a[href]"):
+        href = a.get("href", "").strip()
+        if not href.startswith("http"):
+            continue
+        if "2gis.ru" in href:
+            continue
+        norm = href.split("?")[0]
+        if norm and norm not in seen:
+            seen.add(norm)
+            out.append(norm)
+    return out
+
+
+def _extract_rating_info(soup: BeautifulSoup) -> tuple[float | None, int | None]:
+    # 1) Try JSON-LD aggregateRating.
+    for item in _extract_ld_json_items(soup):
+        ar = item.get("aggregateRating")
+        if not isinstance(ar, dict):
+            continue
+        rating = parse_float(str(ar.get("ratingValue", "")))
+        count = parse_int(str(ar.get("reviewCount", "")))
+        if rating or count:
+            return rating, count
+
+    # 2) Fallback from page text.
+    text = soup.get_text(" ", strip=True)
+    rating = parse_float(text)
+    count = parse_int(text)
+    return rating, count
+
+
+def _extract_ld_json_items(soup: BeautifulSoup) -> list[dict]:
+    items: list[dict] = []
+    for script in soup.select('script[type="application/ld+json"]'):
+        raw = script.string or script.get_text(strip=True)
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+        except Exception:
+            continue
+        chunk = data if isinstance(data, list) else [data]
+        for item in chunk:
+            if isinstance(item, dict):
+                items.append(item)
+    return items

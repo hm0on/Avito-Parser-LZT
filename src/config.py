@@ -52,6 +52,9 @@ class Settings(BaseSettings):
         "газопровод монтаж",
     ]
 
+    # 2GIS (optional explicit API key, otherwise auto-captured from page)
+    twogis_api_key: str = Field(default="", alias="TWOGIS_API_KEY")
+
     # Region
     region: str = "Омск"
     twogis_region_id: str = "4504222397119399"

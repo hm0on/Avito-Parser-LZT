@@ -17,6 +17,7 @@ from src.enrichment.registries.eis import EisChecker
 from src.enrichment.registries.fssp import FsspChecker
 from src.enrichment.registries.nostroy import NostroyChecker
 from src.enrichment.review_searcher import ReviewSearcher
+from src.enrichment.website_scanner import WebsiteScanner, extract_website_candidates
 
 log = structlog.get_logger(__name__)
 
@@ -30,6 +31,7 @@ _CHECKERS = [
 ]
 
 _review_searcher = ReviewSearcher()
+_website_scanner = WebsiteScanner()
 
 # Points awarded for each data/check type toward confidence_score
 _CONFIDENCE_WEIGHTS = {
@@ -49,6 +51,9 @@ class Enricher:
 
     async def enrich(self, raw: CompanyRaw) -> tuple[CompanyEnriched, list[RawReview]]:
         log.info("enricher.start", raw_id=str(raw.id), name=raw.name_raw)
+
+        # 0. Website scan: extract INN/OGRN/phones/emails from company websites.
+        await self._enrich_from_website(raw)
 
         # 1. Normalize phones
         raw_phones: list[str] = raw.phones or []
@@ -119,6 +124,54 @@ class Enricher:
             confidence_score=confidence_score,
             manual_review_required=manual_review_required,
         ), extra_reviews
+
+    async def _enrich_from_website(self, raw: CompanyRaw) -> None:
+        """Scan company websites to extract INN, OGRN, phones, emails."""
+        websites = extract_website_candidates(raw)
+        if not websites:
+            return
+
+        contacts = raw.contacts_json or {}
+        existing_sites = contacts.get("websites") if isinstance(contacts.get("websites"), list) else []
+        merged_sites: list[str] = []
+        for s in existing_sites + websites:
+            if isinstance(s, str) and s not in merged_sites:
+                merged_sites.append(s)
+        contacts["websites"] = merged_sites
+
+        scan_results = []
+        for site in merged_sites[:2]:
+            try:
+                res = await _website_scanner.scan(site)
+                scan_results.append(res.to_dict())
+
+                # Merge phones
+                raw_phones = raw.phones or []
+                for p in res.phones:
+                    if p not in raw_phones:
+                        raw_phones.append(p)
+                raw.phones = raw_phones
+
+                # Merge emails
+                raw_emails = raw.emails or []
+                for e in res.emails:
+                    if e not in raw_emails:
+                        raw_emails.append(e)
+                raw.emails = raw_emails
+
+                # Extract INN/OGRN from website
+                if not raw.inn and res.inn:
+                    raw.inn = res.inn
+                    log.info("enricher.website_inn_found", raw_id=str(raw.id), inn=res.inn, site=site)
+                if not raw.ogrn and res.ogrn:
+                    raw.ogrn = res.ogrn
+                    log.info("enricher.website_ogrn_found", raw_id=str(raw.id), ogrn=res.ogrn, site=site)
+            except Exception as exc:
+                log.warning("enricher.website_scan.error", raw_id=str(raw.id), site=site, error=str(exc))
+
+        if scan_results:
+            contacts["website_scan"] = scan_results
+        raw.contacts_json = contacts
 
     def _compute_confidence(
         self,
