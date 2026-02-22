@@ -83,7 +83,7 @@ class PipelineRunner:
             # Map raw_id → extra reviews found by ReviewSearcher (Flamp/VK/Otzovik)
             extra_reviews_map: dict[str, list[RawReview]] = {}
 
-            enrich_sem = asyncio.Semaphore(3)
+            enrich_sem = asyncio.Semaphore(5)
 
             async def _enrich_one(db_raw: CompanyRaw):
                 async with enrich_sem:
@@ -258,6 +258,17 @@ class PipelineRunner:
 
 
 def _raw_company_to_orm(rc: RawCompany) -> CompanyRaw:
+    # Sanitize numeric fields to prevent int32 overflow in PostgreSQL
+    reviews_count = rc.reviews_count
+    if reviews_count is not None and (reviews_count < 0 or reviews_count > 2_000_000):
+        log.warning("pipeline.sanitize.reviews_count", name=rc.name_raw, bad_value=reviews_count)
+        reviews_count = None
+
+    average_rating = rc.average_rating
+    if average_rating is not None and (average_rating < 0 or average_rating > 5):
+        log.warning("pipeline.sanitize.average_rating", name=rc.name_raw, bad_value=average_rating)
+        average_rating = None
+
     return CompanyRaw(
         id=uuid.uuid4(),
         source=rc.source,
@@ -271,8 +282,8 @@ def _raw_company_to_orm(rc: RawCompany) -> CompanyRaw:
         contacts_json=rc.contacts_json or {},
         inn=rc.inn,
         ogrn=rc.ogrn,
-        average_rating=rc.average_rating,
-        reviews_count=rc.reviews_count,
+        average_rating=average_rating,
+        reviews_count=reviews_count,
         collected_at=rc.collected_at,
         is_processed=False,
     )

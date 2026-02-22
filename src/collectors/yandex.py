@@ -19,6 +19,7 @@ YANDEX_MAPS_BASE = f"https://yandex.ru/maps/{settings.yandex_region_code}/"
 
 class YandexCollector(AbstractCollector):
     source_name = "yandex"
+    _max_concurrent_keywords = 2  # Playwright is heavy
 
     async def collect(self, keyword: str) -> list[RawCompany]:
         url = f"{YANDEX_MAPS_BASE}?text={quote_plus(keyword)}"
@@ -83,25 +84,37 @@ class YandexCollector(AbstractCollector):
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     async def _scrape_listing(self, page: Page, url: str, keyword: str) -> list[RawCompany]:
-        await page.goto(url, wait_until="networkidle", timeout=45_000)
-        await asyncio.sleep(3)
+        # Yandex Maps is a heavy SPA — domcontentloaded is more reliable than networkidle
+        await page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+        await asyncio.sleep(6)
+
+        # Check for CAPTCHA redirect
+        if "showcaptcha" in page.url or "captcha" in page.url:
+            log.warning("yandex.captcha_detected", url=page.url)
+            return []
 
         # Scroll sidebar to load more results
         sidebar = await page.query_selector(".sidebar-view__panel")
         if sidebar:
             for _ in range(5):
-                await sidebar.evaluate("el => el.scrollBy(0, 400)")
+                await sidebar.evaluate("el => el.scrollBy(0, 600)")
                 await asyncio.sleep(0.8)
 
-        # Collect listing cards (Yandex frequently renames CSS classes)
+        # Collect listing cards
         cards = await self._find_cards(page)
         log.info("yandex.listing.cards_found", count=len(cards), keyword=keyword)
 
         companies: list[RawCompany] = []
-        for card in cards[:25]:
+        seen_ids: set[str] = set()
+        for card in cards[:40]:
             try:
                 company = await self._parse_card(page, card, keyword)
                 if company:
+                    # Deduplicate by source_id
+                    if company.source_id and company.source_id in seen_ids:
+                        continue
+                    if company.source_id:
+                        seen_ids.add(company.source_id)
                     companies.append(company)
             except Exception as exc:
                 log.warning("yandex.card.parse_error", error=str(exc))
@@ -109,62 +122,84 @@ class YandexCollector(AbstractCollector):
         return companies
 
     async def _find_cards(self, page: Page):
-        """Try multiple CSS selectors — Yandex often renames class prefixes."""
-        selectors = [
-            "[class*='search-snippet']",
-            "[class*='search-business-snippet-view']",
-            "[class*='search-business-snippet']",
-            "[class*='search-snippet-view']",
-        ]
-        for selector in selectors:
-            cards = await page.query_selector_all(selector)
-            if cards:
-                return cards
+        """Find business snippet cards, filtering out nested inner elements.
 
-        # Extra wait for slow rendering
-        await asyncio.sleep(2)
-        for selector in selectors:
-            cards = await page.query_selector_all(selector)
-            if cards:
-                return cards
+        Yandex nests snippet elements inside each other (e.g. related items).
+        We only want top-level snippets that have a title.
+        """
+        # Use JS to filter to only snippets that directly contain a title
+        cards = await page.evaluate_handle("""() => {
+            const all = document.querySelectorAll('.search-business-snippet-view');
+            const result = [];
+            for (const el of all) {
+                // Skip if this element is nested inside another snippet
+                const parent = el.parentElement?.closest('.search-business-snippet-view');
+                if (parent) continue;
+                // Must have a title to be a real company card
+                const title = el.querySelector('.search-business-snippet-view__title');
+                if (title) result.push(el);
+            }
+            return result;
+        }""")
+
+        # Convert JSHandle array to element handles
+        length = await cards.evaluate("arr => arr.length")
+        if length > 0:
+            elements = []
+            for i in range(length):
+                el = await cards.evaluate_handle(f"arr => arr[{i}]")
+                elements.append(el.as_element())
+            log.debug("yandex.find_cards.filtered", total_raw=length)
+            return elements
+
+        # Fallback: try broader selectors
+        await asyncio.sleep(3)
+        for selector in [
+            "[class*='search-business-snippet-view']",
+            "[class*='search-snippet']",
+        ]:
+            cards_list = await page.query_selector_all(selector)
+            if cards_list:
+                return cards_list
         return []
 
     async def _parse_card(self, page: Page, card, keyword: str) -> RawCompany | None:
-        name_el = await card.query_selector("[class*='orgcard-header__name']")
+        # Name: snippet title
+        name_el = await card.query_selector("[class*='snippet-view__title']")
         if not name_el:
             name_el = await card.query_selector("h2")
         name_raw = (await name_el.inner_text()).strip() if name_el else None
 
-        # Rating
-        rating_el = await card.query_selector("[class*='business-rating-badge-view__rating']")
+        # Rating (e.g. "4,9")
+        rating_el = await card.query_selector("[class*='rating-badge-view__rating-text']")
+        if not rating_el:
+            rating_el = await card.query_selector("[class*='rating-badge-view__rating']")
         average_rating = parse_float(
             (await rating_el.inner_text()).strip() if rating_el else ""
         )
 
-        # Reviews count
-        reviews_el = await card.query_selector("[class*='business-rating-badge-view__count']")
+        # Reviews count (e.g. "962 оценки")
+        reviews_el = await card.query_selector("[class*='rating-with-text-view__count']")
+        if not reviews_el:
+            reviews_el = await card.query_selector("[class*='rating-badge-view__count']")
         reviews_count = parse_int(
             (await reviews_el.inner_text()).strip() if reviews_el else ""
         )
 
         # Address
-        addr_el = await card.query_selector("[class*='orgcard-subtitle']")
+        addr_el = await card.query_selector("[class*='snippet-view__address']")
+        if not addr_el:
+            addr_el = await card.query_selector("[class*='orgcard-subtitle']")
         addresses = []
         if addr_el:
             addr_text = (await addr_el.inner_text()).strip()
             if addr_text:
                 addresses = [addr_text]
 
-        # Phone
-        phone_el = await card.query_selector("[class*='contact-item_type_phone']")
-        phones = []
-        if phone_el:
-            phone_text = (await phone_el.inner_text()).strip()
-            if phone_text:
-                phones = [phone_text]
-
-        # Source link
-        link_el = await card.query_selector("a[href*='maps']")
+        # Source link — look for /org/ link inside the card
+        link_el = await card.query_selector("a[href*='/org/']")
+        if not link_el:
+            link_el = await card.query_selector("a[href*='maps']")
         source_link = await link_el.get_attribute("href") if link_el else None
         if source_link and not source_link.startswith("http"):
             source_link = f"https://yandex.ru{source_link}"
@@ -182,7 +217,7 @@ class YandexCollector(AbstractCollector):
             source_id=source_id,
             source_link=source_link,
             name_raw=name_raw,
-            phones=phones,
+            phones=[],
             addresses=addresses,
             average_rating=average_rating,
             reviews_count=reviews_count,

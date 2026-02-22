@@ -240,27 +240,12 @@ class AvitoCollector(AbstractCollector):
         self._cookies_provider = _build_cookies_provider()
 
     async def enrich_phones(self, companies: list[RawCompany]) -> None:
-        """Fetch phone numbers for collected companies via spfa.ru/api/phone/.
+        """Phone enrichment via spfa.ru API — disabled to save costs.
 
-        Call this after collection (and optional limiting) to avoid wasting credits.
+        Phones are obtained from other sources (2GIS, Yandex, website scanner).
         """
-        if not self._cookies_provider:
-            return
-        avito = [c for c in companies if c.source == "avito" and c.source_id]
-        if not avito:
-            return
-        ad_ids = [c.source_id for c in avito]
-        log.info("avito.phones.start", total=len(ad_ids))
-        phones = await asyncio.to_thread(
-            self._cookies_provider.fetch_phones, ad_ids
-        )
-        matched = 0
-        for company in avito:
-            phone = phones.get(company.source_id)
-            if phone:
-                company.phones = [phone]
-                matched += 1
-        log.info("avito.phones.done", matched=matched, total=len(avito))
+        log.info("avito.phones.skipped", reason="disabled_to_save_costs")
+        return
 
     async def enrich_reviews(self, companies: list[RawCompany]) -> None:
         """Fetch seller reviews for Avito companies using httpx (no Playwright).

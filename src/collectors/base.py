@@ -1,5 +1,6 @@
 """Abstract base collector — defines the interface every collector must implement."""
 
+import asyncio
 import re
 import uuid
 from abc import ABC, abstractmethod
@@ -55,15 +56,37 @@ class AbstractCollector(ABC):
     async def collect(self, keyword: str) -> list[RawCompany]:
         """Collect companies for a single keyword."""
 
+    # Max concurrent keyword tasks per collector (override in subclass if needed)
+    _max_concurrent_keywords: int = 3
+
     async def run(self, keywords: list[str] | None = None) -> list[RawCompany]:
-        """Run collection for all keywords and return combined results."""
+        """Run collection for all keywords concurrently and return combined results."""
         from src.config import settings
 
         keywords = keywords or settings.search_keywords
+        sem = asyncio.Semaphore(self._max_concurrent_keywords)
+
+        async def _collect_one(kw: str) -> list[RawCompany]:
+            async with sem:
+                return await self.collect(kw)
+
+        results = await asyncio.gather(
+            *[_collect_one(kw) for kw in keywords],
+            return_exceptions=True,
+        )
+
         all_results: list[RawCompany] = []
-        for kw in keywords:
-            results = await self.collect(kw)
-            all_results.extend(results)
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                import structlog
+                structlog.get_logger(__name__).error(
+                    "collector.keyword_error",
+                    source=self.source_name,
+                    keyword=keywords[i],
+                    error=str(result),
+                )
+            else:
+                all_results.extend(result)
         return all_results
 
 
@@ -80,6 +103,9 @@ def parse_float(text: str) -> float | None:
 
 
 def parse_int(text: str) -> int | None:
-    """Extract the first integer from text ('29 отзывов' → 29)."""
-    digits = re.sub(r"\D", "", text)
-    return int(digits) if digits else None
+    """Extract the first standalone integer from text ('29 отзывов' → 29).
+
+    Matches word-boundary numbers to avoid concatenating all digits from the text.
+    """
+    m = re.search(r"\b(\d{1,7})\b", text)
+    return int(m.group(1)) if m else None

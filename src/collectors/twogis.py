@@ -28,6 +28,7 @@ _SEARCH_URL = "https://2gis.ru/omsk/search/{query}"
 
 class TwoGisCollector(AbstractCollector):
     source_name = "2gis"
+    _max_concurrent_keywords = 2  # Playwright is heavy
 
     # Class-level cache — key is extracted once and reused across keywords
     _api_key: str | None = None
@@ -533,7 +534,7 @@ def _extract_websites(soup: BeautifulSoup) -> list[str]:
 
 
 def _extract_rating_info(soup: BeautifulSoup) -> tuple[float | None, int | None]:
-    # 1) Try JSON-LD aggregateRating.
+    # 1) Try JSON-LD aggregateRating (most reliable).
     for item in _extract_ld_json_items(soup):
         ar = item.get("aggregateRating")
         if not isinstance(ar, dict):
@@ -543,10 +544,34 @@ def _extract_rating_info(soup: BeautifulSoup) -> tuple[float | None, int | None]
         if rating or count:
             return rating, count
 
-    # 2) Fallback from page text.
-    text = soup.get_text(" ", strip=True)
-    rating = parse_float(text)
-    count = parse_int(text)
+    # 2) Try meta tags.
+    meta_rating = soup.find("meta", attrs={"itemprop": "ratingValue"})
+    meta_count = soup.find("meta", attrs={"itemprop": "reviewCount"})
+    if meta_rating or meta_count:
+        rating = parse_float(meta_rating["content"]) if meta_rating and meta_rating.get("content") else None
+        count = parse_int(meta_count["content"]) if meta_count and meta_count.get("content") else None
+        if rating or count:
+            return rating, count
+
+    # 3) Try rating-related elements by class/itemprop (targeted, not full page text).
+    rating = None
+    count = None
+    for el in soup.select('[class*="rating"], [itemprop="ratingValue"]'):
+        txt = _text(el)
+        if txt and len(txt) < 20:
+            r = parse_float(txt)
+            if r is not None and 0 < r <= 5:
+                rating = r
+                break
+
+    for el in soup.select('[class*="review"], [class*="comment"], [itemprop="reviewCount"]'):
+        txt = _text(el)
+        if txt and len(txt) < 30:
+            c = parse_int(txt)
+            if c is not None and 0 < c < 1_000_000:
+                count = c
+                break
+
     return rating, count
 
 

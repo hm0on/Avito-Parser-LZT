@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     # Region
     region: str = "Омск"
     twogis_region_id: str = "4504222397119399"
-    yandex_region_code: str = "54"
+    yandex_region_code: str = "66/omsk"
 
 
 settings = Settings()

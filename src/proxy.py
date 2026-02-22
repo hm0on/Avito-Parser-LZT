@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
+from urllib.parse import urlparse
 
 import structlog
 
@@ -67,9 +68,21 @@ class ProxyManager:
         return proxy
 
     def playwright_proxy(self) -> dict | None:
-        """Return a Playwright-compatible proxy dict, or None."""
+        """Return a Playwright-compatible proxy dict, or None.
+
+        Playwright requires username/password as separate fields,
+        not embedded in the URL (http://user:pass@host:port won't work).
+        """
         url = self.get_next()
-        return {"server": url} if url else None
+        if not url:
+            return None
+        parsed = urlparse(url)
+        proxy: dict = {"server": f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"}
+        if parsed.username:
+            proxy["username"] = parsed.username
+        if parsed.password:
+            proxy["password"] = parsed.password
+        return proxy
 
     @property
     def count(self) -> int:
