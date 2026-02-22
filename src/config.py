@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     # Stage 2 Review Enrichment
     serpapi_key: str = Field(default="", alias="SERPAPI_KEY")
     enable_review_enrichment: bool = Field(default=True, alias="ENABLE_REVIEW_ENRICHMENT")
+    enable_phone_parsing: bool = Field(default=True, alias="ENABLE_PHONE_PARSING")
 
     # Pipeline thresholds
     dedup_threshold: int = Field(default=85, alias="DEDUP_THRESHOLD")
@@ -52,10 +53,35 @@ class Settings(BaseSettings):
         "газопровод монтаж",
     ]
 
+    # 2GIS
+    twogis_api_key: str = Field(default="", alias="TWOGIS_API_KEY")
+    twogis_debug_browser: bool = Field(default=False, alias="TWOGIS_DEBUG_BROWSER")
+    twogis_search_max_pages: int = Field(default=8, alias="TWOGIS_SEARCH_MAX_PAGES")
+    twogis_firm_workers: int = Field(default=4, alias="TWOGIS_FIRM_WORKERS")
+    twogis_tabs_per_browser: int = Field(default=3, alias="TWOGIS_TABS_PER_BROWSER")
+    twogis_company_retry_attempts: int = Field(default=2, alias="TWOGIS_COMPANY_RETRY_ATTEMPTS")
+    twogis_retry_until_success: bool = Field(default=True, alias="TWOGIS_RETRY_UNTIL_SUCCESS")
+    twogis_max_proxy_rotations: int = Field(default=30, alias="TWOGIS_MAX_PROXY_ROTATIONS")
+    # Искать по всей Омской области (+ районные города), а не только по Омску
+    twogis_search_region: bool = Field(default=True, alias="TWOGIS_SEARCH_REGION")
+
+    # Yandex debug mode
+    yandex_debug_browser: bool = Field(default=False, alias="YANDEX_DEBUG")
+    yandex_debug_slow_mo_ms: int = Field(default=0, alias="YANDEX_DEBUG_SLOW_MO_MS")
+    yandex_debug_hold_seconds: float = Field(default=0.0, alias="YANDEX_DEBUG_HOLD_SECONDS")
+    yandex_debug_screenshot_path: str = Field(
+        default="storage/yandex_debug_last.png",
+        alias="YANDEX_DEBUG_SCREENSHOT_PATH",
+    )
+    yandex_browser_restart_attempts: int = Field(default=3, alias="YANDEX_BROWSER_RESTART_ATTEMPTS")
+    yandex_state_view_immediate: bool = Field(default=True, alias="YANDEX_STATE_VIEW_IMMEDIATE")
+    yandex_single_pass: bool = Field(default=True, alias="YANDEX_SINGLE_PASS")
+
     # Region
     region: str = "Омск"
     twogis_region_id: str = "4504222397119399"
-    yandex_region_code: str = "54"
+    # Leave empty to use global /maps/ URL (more stable)
+    yandex_region_code: str = ""
 
 
 settings = Settings()

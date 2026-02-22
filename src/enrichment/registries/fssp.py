@@ -45,6 +45,7 @@ class FsspChecker(AbstractChecker):
         inn: str | None = None,
         ogrn: str | None = None,
         name: str | None = None,
+        extra: dict | None = None,
     ) -> CheckResult:
         if not name and not inn:
             return CheckResult(registry=self.registry_name, found=False, error="name or INN required")

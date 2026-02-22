@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 import structlog
 
@@ -30,12 +30,13 @@ log = structlog.get_logger(__name__)
 class PipelineRunner:
     """Orchestrates all 5 pipeline stages."""
 
-    def __init__(self) -> None:
+    def __init__(self, company_limit: int = 0) -> None:
         self.collectors = [
             AvitoCollector(),
             TwoGisCollector(),
             YandexCollector(),
         ]
+        self.company_limit = company_limit
         self.enricher = Enricher()
         self.deduplicator = Deduplicator()
         self.summarizer = ReviewSummarizer()
@@ -43,7 +44,7 @@ class PipelineRunner:
 
     async def run(self) -> None:
         log.info("pipeline.start")
-        start = datetime.utcnow()
+        start = datetime.now(UTC)
 
         async with AsyncSessionLocal() as session:
             # ── Stage 1: Collect ─────────────────────────────────────────
@@ -76,14 +77,28 @@ class PipelineRunner:
             await session.flush()
             log.info("pipeline.stage1.persisted", count=len(db_raws))
 
-            # ── Stage 2: Enrich ──────────────────────────────────────────
+            # ── Stage 2: Enrich (concurrent) ─────────────────────────────
             log.info("pipeline.stage2.enrich")
             enriched_pairs: list[tuple[CompanyRaw, CompanyEnriched]] = []
             # Map raw_id → extra reviews found by ReviewSearcher (Flamp/VK/Otzovik)
             extra_reviews_map: dict[str, list[RawReview]] = {}
 
-            for db_raw in db_raws:
-                enriched, extra_reviews = await self.enricher.enrich(db_raw)
+            enrich_sem = asyncio.Semaphore(5)
+
+            async def _enrich_one(db_raw: CompanyRaw):
+                async with enrich_sem:
+                    return db_raw, await self.enricher.enrich(db_raw)
+
+            enrich_results = await asyncio.gather(
+                *[_enrich_one(db_raw) for db_raw in db_raws],
+                return_exceptions=True,
+            )
+
+            for result in enrich_results:
+                if isinstance(result, Exception):
+                    log.error("pipeline.enrich.error", error=str(result))
+                    continue
+                db_raw, (enriched, extra_reviews) = result
                 session.add(enriched)
                 enriched_pairs.append((db_raw, enriched))
                 db_raw.is_processed = True
@@ -104,7 +119,12 @@ class PipelineRunner:
                         ))
 
             await session.flush()
-            log.info("pipeline.stage2.done", count=len(enriched_pairs))
+            log.info(
+                "pipeline.stage2.done",
+                count=len(enriched_pairs),
+                extra_reviews_total=sum(len(v) for v in extra_reviews_map.values()),
+                companies_with_extra_reviews=len(extra_reviews_map),
+            )
 
             # ── Stage 3: Deduplicate ─────────────────────────────────────
             log.info("pipeline.stage3.dedup")
@@ -113,33 +133,56 @@ class PipelineRunner:
 
             # ── Stage 4 + 5: AI summarize, risk assess, write clean ──────
             log.info("pipeline.stage4.ai_and_write")
-            for card in canonical_cards:
-                # Gather reviews from Stage 1 collectors + Stage 2 enrichment
-                reviews_for_ai = _gather_reviews(card, db_id_map, extra_reviews_map)
+            ai_sem = asyncio.Semaphore(5)
 
-                summary = await self.summarizer.summarize(
-                    company_name=card.name_normalized,
-                    reviews=reviews_for_ai,
-                )
-                card.reviews_sample = reviews_for_ai[: settings.max_reviews_per_company]
+            async def _process_card(card: CanonicalCard):
+                async with ai_sem:
+                    # Gather reviews from Stage 1 collectors + Stage 2 enrichment
+                    reviews_for_ai = _gather_reviews(card, db_id_map, extra_reviews_map)
 
-                risk_level, risk_reasons = await self.risk_assessor.assess(
-                    checks=card.checks,
-                    reviews=reviews_for_ai,
-                    company_name=card.name_normalized,
-                )
+                    # Update reviews_count / average_rating from actually collected reviews
+                    # Use the larger of metadata count vs actual collected texts
+                    if reviews_for_ai:
+                        card.reviews_count = max(card.reviews_count or 0, len(reviews_for_ai))
+                        ratings = [r["rating"] for r in reviews_for_ai if r.get("rating")]
+                        if ratings:
+                            card.average_rating = round(sum(ratings) / len(ratings), 2)
 
+                    summary = await self.summarizer.summarize(
+                        company_name=card.name_normalized,
+                        reviews=reviews_for_ai,
+                    )
+                    card.reviews_sample = reviews_for_ai[: settings.max_reviews_per_company]
+
+                    risk_level, risk_reasons = await self.risk_assessor.assess(
+                        checks=card.checks,
+                        reviews=reviews_for_ai,
+                        company_name=card.name_normalized,
+                    )
+                    return card, summary, risk_level, risk_reasons
+
+            ai_results = await asyncio.gather(
+                *[_process_card(card) for card in canonical_cards],
+                return_exceptions=True,
+            )
+            for result in ai_results:
+                if isinstance(result, Exception):
+                    log.error("pipeline.ai.error", error=str(result))
+                    continue
+                card, summary, risk_level, risk_reasons = result
                 clean = _canonical_to_orm(card, summary, risk_level, risk_reasons)
                 session.add(clean)
 
             await session.commit()
-            elapsed = (datetime.utcnow() - start).total_seconds()
+            elapsed = (datetime.now(UTC) - start).total_seconds()
             log.info("pipeline.done", elapsed_s=elapsed, canonical_count=len(canonical_cards))
 
     async def _collect_all(self) -> list[RawCompany]:
         tasks = [collector.run() for collector in self.collectors]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        all_companies: list[RawCompany] = []
+
+        # Group by source so we can distribute the limit evenly
+        by_source: dict[str, list[RawCompany]] = {}
         for i, result in enumerate(results):
             if isinstance(result, Exception):
                 log.error(
@@ -148,7 +191,66 @@ class PipelineRunner:
                     error=str(result),
                 )
             else:
-                all_companies.extend(result)
+                source = self.collectors[i].source_name
+                by_source[source] = result
+
+        log.info(
+            "pipeline.collected_per_source",
+            **{src: len(items) for src, items in by_source.items()},
+        )
+
+        # Apply limit evenly across sources (round-robin)
+        all_companies: list[RawCompany] = []
+        if self.company_limit and sum(len(v) for v in by_source.values()) > self.company_limit:
+            per_source = max(1, self.company_limit // max(len(by_source), 1))
+            for src, items in by_source.items():
+                all_companies.extend(items[:per_source])
+            # Fill remaining slots from sources that have more
+            remaining = self.company_limit - len(all_companies)
+            if remaining > 0:
+                used = set(id(c) for c in all_companies)
+                for items in by_source.values():
+                    for c in items:
+                        if id(c) not in used:
+                            all_companies.append(c)
+                            remaining -= 1
+                            if remaining <= 0:
+                                break
+                    if remaining <= 0:
+                        break
+            log.info(
+                "pipeline.limit_applied",
+                original=sum(len(v) for v in by_source.values()),
+                limited=len(all_companies),
+            )
+        else:
+            for items in by_source.values():
+                all_companies.extend(items)
+
+        # Log review counts BEFORE enrichment
+        reviews_before = sum(len(c.reviews) for c in all_companies)
+        log.info(
+            "pipeline.pre_enrich",
+            companies=len(all_companies),
+            companies_with_reviews=sum(1 for c in all_companies if c.reviews),
+            total_reviews=reviews_before,
+        )
+
+        # Post-collection enrichment (phones, reviews)
+        for collector in self.collectors:
+            if hasattr(collector, "enrich_phones"):
+                await collector.enrich_phones(all_companies)
+            if hasattr(collector, "enrich_reviews"):
+                await collector.enrich_reviews(all_companies)
+
+        # Log review counts AFTER enrichment
+        reviews_after = sum(len(c.reviews) for c in all_companies)
+        log.info(
+            "pipeline.post_enrich",
+            companies_with_reviews=sum(1 for c in all_companies if c.reviews),
+            total_reviews=reviews_after,
+        )
+
         return all_companies
 
 
@@ -156,6 +258,17 @@ class PipelineRunner:
 
 
 def _raw_company_to_orm(rc: RawCompany) -> CompanyRaw:
+    # Sanitize numeric fields to prevent int32 overflow in PostgreSQL
+    reviews_count = rc.reviews_count
+    if reviews_count is not None and (reviews_count < 0 or reviews_count > 2_000_000):
+        log.warning("pipeline.sanitize.reviews_count", name=rc.name_raw, bad_value=reviews_count)
+        reviews_count = None
+
+    average_rating = rc.average_rating
+    if average_rating is not None and (average_rating < 0 or average_rating > 5):
+        log.warning("pipeline.sanitize.average_rating", name=rc.name_raw, bad_value=average_rating)
+        average_rating = None
+
     return CompanyRaw(
         id=uuid.uuid4(),
         source=rc.source,
@@ -169,8 +282,8 @@ def _raw_company_to_orm(rc: RawCompany) -> CompanyRaw:
         contacts_json=rc.contacts_json or {},
         inn=rc.inn,
         ogrn=rc.ogrn,
-        average_rating=rc.average_rating,
-        reviews_count=rc.reviews_count,
+        average_rating=average_rating,
+        reviews_count=reviews_count,
         collected_at=rc.collected_at,
         is_processed=False,
     )
@@ -201,6 +314,8 @@ def _gather_reviews(
     """
     source_ids = set(card.source_records)  # str UUIDs of CompanyRaw rows
     reviews: list[dict] = []
+    stage1_count = 0
+    stage2_count = 0
 
     for raw_id in source_ids:
         # Stage-1 collector reviews
@@ -208,10 +323,21 @@ def _gather_reviews(
         if rc:
             for rv in rc.reviews:
                 reviews.append(_rv_to_dict(rv))
+                stage1_count += 1
 
         # Stage-2 enrichment reviews (Flamp/VK/Otzovik)
         for rv in extra_reviews_map.get(raw_id, []):
             reviews.append(_rv_to_dict(rv))
+            stage2_count += 1
+
+    log.debug(
+        "gather_reviews",
+        company=card.name_normalized,
+        source_ids=len(source_ids),
+        stage1_reviews=stage1_count,
+        stage2_reviews=stage2_count,
+        total=len(reviews),
+    )
 
     return reviews[: settings.max_reviews_per_company]
 

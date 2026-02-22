@@ -30,7 +30,13 @@ class AbstractChecker(ABC):
     registry_name: str = ""
 
     @abstractmethod
-    async def check(self, inn: str | None = None, ogrn: str | None = None, name: str | None = None) -> CheckResult:
+    async def check(
+        self,
+        inn: str | None = None,
+        ogrn: str | None = None,
+        name: str | None = None,
+        extra: dict | None = None,
+    ) -> CheckResult:
         """Perform registry check and return result."""
 
     async def safe_check(
@@ -38,10 +44,11 @@ class AbstractChecker(ABC):
         inn: str | None = None,
         ogrn: str | None = None,
         name: str | None = None,
+        extra: dict | None = None,
     ) -> CheckResult:
         """Wrapper that catches all exceptions and returns error result."""
         try:
-            return await self.check(inn=inn, ogrn=ogrn, name=name)
+            return await self.check(inn=inn, ogrn=ogrn, name=name, extra=extra)
         except Exception as exc:
             return CheckResult(
                 registry=self.registry_name,

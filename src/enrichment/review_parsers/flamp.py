@@ -37,7 +37,15 @@ class FlampParser(AbstractReviewParser):
             log.debug("flamp.no_id", url=url)
             return []
 
-        async with httpx.AsyncClient(timeout=15.0, headers=_BROWSER_HEADERS) as client:
+        from src.proxy import proxy_manager
+        proxy_url = proxy_manager.get_next()
+
+        async with httpx.AsyncClient(
+            timeout=15.0,
+            headers=_BROWSER_HEADERS,
+            proxy=proxy_url or None,
+            follow_redirects=True,
+        ) as client:
             # Primary: JSON API
             try:
                 reviews = await self._fetch_via_api(filial_id, client)
@@ -48,7 +56,9 @@ class FlampParser(AbstractReviewParser):
                 if exc.response.status_code in (403, 404):
                     log.info("flamp.api.blocked", filial_id=filial_id, fallback="scrape")
                 else:
-                    log.warning("flamp.api.error", filial_id=filial_id, error=str(exc))
+                    log.warning("flamp.api.error", filial_id=filial_id, status=exc.response.status_code)
+            except Exception as exc:
+                log.warning("flamp.api.network_error", filial_id=filial_id, error=repr(exc))
 
             # Fallback: HTML scrape
             reviews = await self._fetch_via_scrape(url, client)
@@ -94,9 +104,11 @@ class FlampParser(AbstractReviewParser):
         try:
             resp = await client.get(url)
             if resp.status_code in (403, 404, 429):
+                log.info("flamp.scrape.blocked", status=resp.status_code, url=url)
                 return []
             resp.raise_for_status()
-        except httpx.HTTPError:
+        except httpx.HTTPError as exc:
+            log.warning("flamp.scrape.error", url=url, error=repr(exc))
             return []
 
         return self._parse_page(resp.text, url)

@@ -22,6 +22,7 @@ class EisChecker(AbstractChecker):
         inn: str | None = None,
         ogrn: str | None = None,
         name: str | None = None,
+        extra: dict | None = None,
     ) -> CheckResult:
         if not inn:
             return CheckResult(registry=self.registry_name, found=False, error="INN required for EIS check")

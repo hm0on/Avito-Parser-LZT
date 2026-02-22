@@ -44,21 +44,28 @@ def parse_address(raw: str) -> dict:
     Returns a dict with keys: region, city, district, street, house, raw.
     This is a lightweight heuristic parser — use an external geocoder for
     production-grade accuracy.
+
+    Handles Avito location format: "р-н Кировский· выезжает по городу"
     """
     if not raw:
         return {"raw": raw}
 
-    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    # Avito uses "·" to separate district from coverage area
+    # e.g. "р-н Кировский· выезжает по городу" → district + coverage
+    clean = raw.split("·")[0].strip()
+
+    parts = [p.strip() for p in clean.split(",") if p.strip()]
     result: dict = {"raw": raw}
 
     for part in parts:
         low = part.lower()
-        if any(kw in low for kw in ("обл.", "область", "край", "республика")):
+        # Check district BEFORE city — "р-н" contains priority
+        if any(kw in low for kw in ("р-н", "район")):
+            result.setdefault("district", _strip_prefix(part, ("р-н", "район")))
+        elif any(kw in low for kw in ("обл.", "область", "край", "республика")):
             result.setdefault("region", part)
         elif any(kw in low for kw in ("г.", "город", "омск")):
             result.setdefault("city", _strip_prefix(part, ("г.", "город")))
-        elif any(kw in low for kw in ("р-н", "район")):
-            result.setdefault("district", _strip_prefix(part, ("р-н", "район")))
         elif any(
             kw in low
             for kw in ("ул.", "пр.", "пр-т", "переулок", "бульвар", "шоссе", "площадь")

@@ -18,6 +18,7 @@ class EfrsbChecker(AbstractChecker):
         inn: str | None = None,
         ogrn: str | None = None,
         name: str | None = None,
+        extra: dict | None = None,
     ) -> CheckResult:
         query = inn or ogrn or name
         if not query:
