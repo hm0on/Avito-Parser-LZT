@@ -96,6 +96,8 @@ class FsspChecker(AbstractChecker):
                     proxy=proxy,
                     args=["--no-sandbox", "--disable-dev-shm-usage"],
                 )
+                context = None
+                page = None
                 try:
                     context = await browser.new_context(
                         user_agent=_HEADERS["User-Agent"],
@@ -125,6 +127,10 @@ class FsspChecker(AbstractChecker):
                     html = await page.content()
                     return _parse_html(html, self.registry_name)
                 finally:
+                    if page:
+                        await page.close()
+                    if context:
+                        await context.close()
                     await browser.close()
 
         except Exception as exc:

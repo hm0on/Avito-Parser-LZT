@@ -126,6 +126,12 @@ class TwoGisCollector(AbstractCollector):
                 slow_mo=300 if settings.twogis_debug_browser else 0,
                 args=["--no-sandbox", "--disable-dev-shm-usage"],
             )
+
+            # Phase 1: collect firm URLs using the initial browser, then close it
+            # before spawning parallel worker browsers.
+            firm_urls: list[str] = []
+            context = None
+            page = None
             try:
                 context = await browser.new_context(
                     user_agent=(
@@ -158,18 +164,24 @@ class TwoGisCollector(AbstractCollector):
                 log.info("twogis.ui.pages_collected", count=len(search_pages), use_proxy=use_proxy)
 
                 firm_urls = await self._collect_firm_urls_from_pages(page, search_pages)
-                if not firm_urls:
-                    log.info("twogis.ui.no_firms", use_proxy=use_proxy)
-                    return []
-
-                return await self._scrape_firm_pages_parallel(
-                    pw,
-                    firm_urls[:120],
-                    keyword,
-                    use_proxy=use_proxy,
-                )
             finally:
+                if page:
+                    await page.close()
+                if context:
+                    await context.close()
                 await browser.close()
+
+            if not firm_urls:
+                log.info("twogis.ui.no_firms", use_proxy=use_proxy)
+                return []
+
+            # Phase 2: scrape firm pages in parallel with fresh browsers
+            return await self._scrape_firm_pages_parallel(
+                pw,
+                firm_urls[:120],
+                keyword,
+                use_proxy=use_proxy,
+            )
 
     async def _collect_search_pages(self, page, search_url: str) -> list[str]:
         """Build deterministic /page/N list, preferring real page count from UI."""
@@ -358,6 +370,7 @@ class TwoGisCollector(AbstractCollector):
                 await asyncio.gather(*[_job(url) for url in pending_urls])
                 pending_urls = next_pending
             finally:
+                await context.close()
                 await browser.close()
 
             if pending_urls and attempt < total_attempts:
@@ -534,6 +547,8 @@ class TwoGisCollector(AbstractCollector):
                 slow_mo=300 if settings.twogis_debug_browser else 0,
                 args=["--no-sandbox", "--disable-dev-shm-usage"],
             )
+            context = None
+            page = None
             try:
                 context = await browser.new_context(
                     user_agent=(
@@ -576,6 +591,10 @@ class TwoGisCollector(AbstractCollector):
                 except Exception as exc:
                     log.debug("twogis.key_capture.content_error", error=str(exc), use_proxy=use_proxy)
             finally:
+                if page:
+                    await page.close()
+                if context:
+                    await context.close()
                 await browser.close()
 
         return None
