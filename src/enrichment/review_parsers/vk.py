@@ -67,6 +67,8 @@ class VkParser(AbstractReviewParser):
                 proxy=proxy,
                 args=["--no-sandbox", "--disable-dev-shm-usage"],
             )
+            context = None
+            page = None
             try:
                 context = await browser.new_context(
                     # Use a mobile user-agent so VK serves the simpler m.vk.com layout
@@ -82,6 +84,10 @@ class VkParser(AbstractReviewParser):
                 await page.goto(mobile_url, wait_until="domcontentloaded", timeout=30_000)
                 return await self._extract_posts(page, screen_name)
             finally:
+                if page:
+                    await page.close()
+                if context:
+                    await context.close()
                 await browser.close()
 
     async def _extract_posts(self, page, screen_name: str) -> list[RawReview]:

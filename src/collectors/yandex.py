@@ -79,6 +79,8 @@ class YandexCollector(AbstractCollector):
         async with async_playwright() as pw:
             for attempt in range(1, attempts + 1):
                 browser = await self._launch_browser(pw, use_proxy=use_proxy)
+                context: BrowserContext | None = None
+                page: Page | None = None
                 try:
                     context = await self._new_context(browser)
                     page = await context.new_page()
@@ -109,6 +111,10 @@ class YandexCollector(AbstractCollector):
                         raise
                 finally:
                     await self._debug_hold("before_close")
+                    if page:
+                        await page.close()
+                    if context:
+                        await context.close()
                     await browser.close()
         if last_exc:
             raise last_exc
