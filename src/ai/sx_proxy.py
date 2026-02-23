@@ -92,7 +92,7 @@ async def _create_port(api_key: str, country: str, name_suffix: str) -> str | No
 
         proxy_url = _extract_proxy_url(data)
         if proxy_url:
-            port_id = data.get("id") or data.get("port_id")
+            port_id = _extract_port_id(data)
             if port_id:
                 _port_ids[country] = port_id
                 env_var = f"SX_PROXY_PORT_ID_{country}"
@@ -135,13 +135,28 @@ async def _get_port_info(api_key: str, port_id: int) -> str | None:
         return None
 
 
+def _extract_port_id(data: dict) -> int | None:
+    """Extract port ID from sx.org API response."""
+    pid = data.get("id") or data.get("port_id")
+    if pid:
+        return int(pid)
+    d = data.get("data")
+    if isinstance(d, list) and d:
+        d = d[0]
+    if isinstance(d, dict):
+        pid = d.get("id") or d.get("port_id")
+        if pid:
+            return int(pid)
+    return None
+
+
 def _extract_proxy_url(data: dict) -> str | None:
     """Extract proxy URL from sx.org API response.
 
     Tries multiple possible response formats.
     """
     # Format 1: direct fields
-    host = data.get("host") or data.get("proxy_host") or data.get("ip")
+    host = data.get("host") or data.get("server") or data.get("proxy_host") or data.get("ip")
     port = data.get("port") or data.get("proxy_port")
     username = data.get("username") or data.get("login") or data.get("proxy_login")
     password = data.get("password") or data.get("proxy_password")
@@ -154,13 +169,16 @@ def _extract_proxy_url(data: dict) -> str | None:
         username = username or p.get("username") or p.get("login")
         password = password or p.get("password")
 
-    # Format 3: nested under "data" key
-    if not host and "data" in data and isinstance(data["data"], dict):
+    # Format 3: nested under "data" key (dict or list)
+    if not host and "data" in data:
         d = data["data"]
-        host = d.get("host") or d.get("proxy_host") or d.get("ip")
-        port = d.get("port") or d.get("proxy_port")
-        username = username or d.get("username") or d.get("login")
-        password = password or d.get("password")
+        if isinstance(d, list) and d:
+            d = d[0]
+        if isinstance(d, dict):
+            host = d.get("host") or d.get("server") or d.get("proxy_host") or d.get("ip")
+            port = port or d.get("port") or d.get("proxy_port")
+            username = username or d.get("username") or d.get("login")
+            password = password or d.get("password")
 
     # Format 4: full proxy URL string
     for key in ("proxy_url", "proxy", "url", "connection_string"):
