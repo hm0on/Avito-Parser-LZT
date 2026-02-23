@@ -213,6 +213,13 @@ SCHEDULER_CRON=0 3 * * 1   # minute hour day month weekday
 | `DEDUP_THRESHOLD` | 85 | Минимальный composite score для merge |
 | `CONFIDENCE_THRESHOLD` | 70 | Ниже → `manual_review_required = true` |
 | `MAX_REVIEWS_PER_COMPANY` | 200 | Лимит отзывов для AI-суммаризации |
+| `ENRICH_CONCURRENCY` | 5 | Параллельных обогащений (Stage 2) |
+| `AI_CONCURRENCY` | 5 | Параллельных AI-запросов (Stage 4-5) |
+| `AVITO_MAX_KEYWORDS` | 20 | Параллельных ключевых слов для Avito |
+| `YANDEX_MAX_KEYWORDS` | 20 | Параллельных ключевых слов для Yandex |
+| `TWOGIS_MAX_KEYWORDS` | 20 | Параллельных ключевых слов для 2GIS |
+| `COLLECTOR_MAX_KEYWORDS` | 3 | Глобальный fallback для HTTP-коллекторов без отдельного лимита |
+| `PLAYWRIGHT_MAX_KEYWORDS` | 2 | Глобальный fallback для Playwright-коллекторов без отдельного лимита |
 
 ### 2GIS
 

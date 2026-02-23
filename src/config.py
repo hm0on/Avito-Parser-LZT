@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     sx_proxy_api_key: str = Field(default="", alias="SX_PROXY_API_KEY")
     sx_proxy_port_id_ru: int = Field(default=0, alias="SX_PROXY_PORT_ID_RU")
     sx_proxy_port_id_us: int = Field(default=0, alias="SX_PROXY_PORT_ID_US")
+    # Safety: forbid автоматические покупки портов на проде
+    sx_proxy_allow_create: bool = Field(default=False, alias="SX_PROXY_ALLOW_CREATE")
 
     # Avito cookies via spfa.ru (~12₽/set, lasts 12h) — bypass Avito firewall
     # Register at https://spfa.ru to get a key
@@ -47,6 +49,9 @@ class Settings(BaseSettings):
     ai_concurrency: int = Field(default=5, alias="AI_CONCURRENCY")
     collector_max_keywords: int = Field(default=3, alias="COLLECTOR_MAX_KEYWORDS")
     playwright_max_keywords: int = Field(default=2, alias="PLAYWRIGHT_MAX_KEYWORDS")
+    avito_max_keywords: int = Field(default=20, alias="AVITO_MAX_KEYWORDS")
+    yandex_max_keywords: int = Field(default=20, alias="YANDEX_MAX_KEYWORDS")
+    twogis_max_keywords: int = Field(default=20, alias="TWOGIS_MAX_KEYWORDS")
 
     # Scheduler
     scheduler_cron: str = Field(default="0 3 * * 1", alias="SCHEDULER_CRON")

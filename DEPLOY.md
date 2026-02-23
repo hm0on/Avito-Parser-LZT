@@ -140,16 +140,22 @@ docker compose run --rm api alembic upgrade head
 | `TWOGIS_TABS_PER_BROWSER` | 3 | Вкладок на браузер |
 | `ENRICH_CONCURRENCY` | 5 | Параллельных обогащений (Stage 2) |
 | `AI_CONCURRENCY` | 5 | Параллельных AI-запросов (Stage 4-5) |
-| `COLLECTOR_MAX_KEYWORDS` | 3 | Параллельных ключевых слов (Avito) |
-| `PLAYWRIGHT_MAX_KEYWORDS` | 2 | Параллельных ключевых слов (2GIS, Yandex) |
+| `AVITO_MAX_KEYWORDS` | 20 | Параллельных ключевых слов для Avito |
+| `YANDEX_MAX_KEYWORDS` | 20 | Параллельных ключевых слов для Yandex |
+| `TWOGIS_MAX_KEYWORDS` | 20 | Параллельных ключевых слов для 2GIS |
+| `COLLECTOR_MAX_KEYWORDS` | 3 | Глобальный fallback для HTTP-коллекторов без отдельного лимита |
+| `PLAYWRIGHT_MAX_KEYWORDS` | 2 | Глобальный fallback для Playwright-коллекторов без отдельного лимита |
 
-Пример для мощного сервера (64 ГБ RAM):
+Пример для мощного сервера (62 ГБ RAM):
 
 ```env
 TWOGIS_FIRM_WORKERS=10
 TWOGIS_TABS_PER_BROWSER=5
 ENRICH_CONCURRENCY=15
 AI_CONCURRENCY=10
+AVITO_MAX_KEYWORDS=20
+YANDEX_MAX_KEYWORDS=20
+TWOGIS_MAX_KEYWORDS=20
 COLLECTOR_MAX_KEYWORDS=6
 PLAYWRIGHT_MAX_KEYWORDS=4
 ```

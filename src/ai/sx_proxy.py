@@ -43,6 +43,14 @@ async def get_proxy(country: str = "RU", name_suffix: str = "scraping") -> str |
             _cache[country] = url
             _port_ids[country] = saved_id
             return url
+        log.warning("sx_proxy.port_info.missing", country=country, port_id=saved_id)
+        if not settings.sx_proxy_allow_create:
+            log.warning("sx_proxy.create_blocked", reason="SX_PROXY_ALLOW_CREATE=false", country=country)
+            return None
+
+    if not settings.sx_proxy_allow_create:
+        log.warning("sx_proxy.create_blocked", reason="SX_PROXY_ALLOW_CREATE=false", country=country)
+        return None
 
     # Create a new port
     url = await _create_port(api_key, country, name_suffix)
@@ -120,7 +128,9 @@ async def _get_port_info(api_key: str, port_id: int) -> str | None:
         async with httpx.AsyncClient(timeout=20.0) as client:
             resp = await client.get(endpoint)
             resp.raise_for_status()
-            data = resp.json()
+            raw = resp.json()
+            # API sometimes wraps payload in "data" or "message"
+            data = raw.get("data") or raw.get("message") or raw
 
         proxy_url = _extract_proxy_url(data)
         if proxy_url:
@@ -140,11 +150,13 @@ def _extract_port_id(data: dict) -> int | None:
     pid = data.get("id") or data.get("port_id")
     if pid:
         return int(pid)
-    d = data.get("data")
+    d = data.get("data") or data.get("message") or data.get("info")
     if isinstance(d, list) and d:
         d = d[0]
     if isinstance(d, dict):
         pid = d.get("id") or d.get("port_id")
+        if not pid and "info" in d and isinstance(d["info"], dict):
+            pid = d["info"].get("id") or d["info"].get("port_id")
         if pid:
             return int(pid)
     return None
@@ -155,6 +167,13 @@ def _extract_proxy_url(data: dict) -> str | None:
 
     Tries multiple possible response formats.
     """
+    # Unwrap message/data wrappers
+    if "message" in data and isinstance(data["message"], dict):
+        data = data["message"]
+    if "data" in data and isinstance(data["data"], dict):
+        # Prefer proxy/info inside data
+        data = data["data"]
+
     # Format 1: direct fields
     host = data.get("host") or data.get("server") or data.get("proxy_host") or data.get("ip")
     port = data.get("port") or data.get("proxy_port")
@@ -168,6 +187,10 @@ def _extract_proxy_url(data: dict) -> str | None:
         port = p.get("port")
         username = username or p.get("username") or p.get("login")
         password = password or p.get("password")
+        auth = p.get("auth") if isinstance(p, dict) else None
+        if isinstance(auth, dict):
+            username = username or auth.get("login") or auth.get("username")
+            password = password or auth.get("password")
 
     # Format 3: nested under "data" key (dict or list)
     if not host and "data" in data:

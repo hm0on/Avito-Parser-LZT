@@ -235,6 +235,7 @@ def _build_cookies_provider() -> _SpfaCookiesProvider | None:
 
 class AvitoCollector(AbstractCollector):
     source_name = "avito"
+    _concurrency_setting_attr = "avito_max_keywords"
 
     def __init__(self) -> None:
         self._cookies_provider = _build_cookies_provider()
