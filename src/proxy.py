@@ -1,4 +1,4 @@
-"""ProxyManager — round-robin rotation from proxies.txt or single PROXY_URL."""
+"""ProxyManager — round-robin rotation from sx.org RU proxies, proxies.txt, or PROXY_URL."""
 
 from __future__ import annotations
 
@@ -17,9 +17,10 @@ class ProxyManager:
     """Thread-safe round-robin proxy rotator.
 
     Priority:
-    1. PROXY_FILE (path to a file with one proxy per line)
-    2. PROXY_URL  (single proxy string)
-    3. No proxy   (direct connection)
+    1. SX.org RU proxy (fetched async on first use via ensure_loaded())
+    2. PROXY_FILE (path to a file with one proxy per line)
+    3. PROXY_URL  (single proxy string)
+    4. No proxy   (direct connection)
 
     Proxy line format (each line in the file):
         http://user:pass@host:port
@@ -31,9 +32,11 @@ class ProxyManager:
         self._proxies: list[str] = []
         self._index: int = 0
         self._lock = threading.Lock()
-        self._load()
+        self._sx_loaded = False
+        self._load_static()
 
-    def _load(self) -> None:
+    def _load_static(self) -> None:
+        """Load proxies from PROXY_FILE / PROXY_URL (sync, at import time)."""
         loaded: list[str] = []
 
         # 1. Try PROXY_FILE
@@ -54,9 +57,34 @@ class ProxyManager:
             log.info("proxy_manager.loaded_env", proxy=settings.proxy_url)
 
         if not loaded:
-            log.info("proxy_manager.no_proxy")
+            log.info("proxy_manager.no_static_proxy")
 
         self._proxies = loaded
+
+    async def ensure_loaded(self) -> None:
+        """Fetch sx.org RU proxy and prepend to the pool (async, call before pipeline)."""
+        if self._sx_loaded:
+            return
+        self._sx_loaded = True
+
+        if not settings.sx_proxy_api_key:
+            return
+
+        from src.ai.sx_proxy import get_ru_proxy
+
+        ru_proxy = await get_ru_proxy()
+        if ru_proxy:
+            with self._lock:
+                # Prepend sx.org proxy so it has priority
+                if ru_proxy not in self._proxies:
+                    self._proxies.insert(0, ru_proxy)
+            log.info(
+                "proxy_manager.sx_ru_loaded",
+                proxy=ru_proxy.split("@")[-1],
+                total=len(self._proxies),
+            )
+        else:
+            log.warning("proxy_manager.sx_ru_failed", fallback_count=len(self._proxies))
 
     def get_next(self) -> str | None:
         """Return the next proxy in rotation, or None if no proxies are configured."""

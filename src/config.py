@@ -23,8 +23,10 @@ class Settings(BaseSettings):
     proxy_url: str = Field(default="", alias="PROXY_URL")
     proxy_file: str = Field(default="", alias="PROXY_FILE")
 
-    # SX.org proxy API key (stored for future wiring)
+    # SX.org proxy (RU для скрапинга, US для OpenAI API)
     sx_proxy_api_key: str = Field(default="", alias="SX_PROXY_API_KEY")
+    sx_proxy_port_id_ru: int = Field(default=0, alias="SX_PROXY_PORT_ID_RU")
+    sx_proxy_port_id_us: int = Field(default=0, alias="SX_PROXY_PORT_ID_US")
 
     # Avito cookies via spfa.ru (~12₽/set, lasts 12h) — bypass Avito firewall
     # Register at https://spfa.ru to get a key

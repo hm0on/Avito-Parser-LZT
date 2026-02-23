@@ -73,9 +73,19 @@ Interactive docs: `http://localhost:8000/docs` (Swagger UI)
   "source_records": ["uuid1", "uuid2"],
   "merged_sources": ["avito", "2gis"],
   "checks": {
-    "dadata_fns": {"found": true, "status": "ACTIVE"},
+    "dadata_fns": {"found": true, "status": "ACTIVE", "details": {...}},
+    "fns_pb": {"found": true, "details": {"risk_markers": [], "head_fio": "..."}},
     "fssp": {"found": false},
-    "nostroy": {"found": true, "status": "active"}
+    "kad_arbitr": {"found": false},
+    "efrsb": {"found": false},
+    "eis_zakupki": {"found": false},
+    "nostroy": {"found": true, "status": "active"},
+    "fns_msp": {"found": true, "details": {"in_msp": true, "category": "micro"}},
+    "rnp": {"found": false},
+    "proverki": {"found": false},
+    "fns_npd": {"found": false},
+    "fns_disqualified": {"found": false},
+    "fns_mass_address": {"found": false}
   },
   "manual_review_required": false,
   "last_updated": "2026-02-19T03:00:00Z",

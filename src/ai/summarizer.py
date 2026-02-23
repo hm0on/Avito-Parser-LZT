@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import httpx
 import structlog
 from openai import AsyncOpenAI
 
+from src.ai.sx_proxy import get_us_proxy
 from src.config import settings
 
 log = structlog.get_logger(__name__)
@@ -35,10 +37,22 @@ _USER_TEMPLATE = """
 class ReviewSummarizer:
     def __init__(self) -> None:
         self._client: AsyncOpenAI | None = None
+        self._http_client: httpx.AsyncClient | None = None
 
-    def _get_client(self) -> AsyncOpenAI:
+    async def _get_client(self) -> AsyncOpenAI:
         if self._client is None:
-            self._client = AsyncOpenAI(api_key=settings.openai_api_key)
+            # Get sx.org US proxy for OpenAI (bypasses Russian blocks)
+            proxy_url = await get_us_proxy()
+            if proxy_url:
+                log.info("summarizer.using_proxy", proxy=proxy_url.split("@")[-1])
+                self._http_client = httpx.AsyncClient(proxy=proxy_url)
+                self._client = AsyncOpenAI(
+                    api_key=settings.openai_api_key,
+                    http_client=self._http_client,
+                )
+            else:
+                log.info("summarizer.direct_connection")
+                self._client = AsyncOpenAI(api_key=settings.openai_api_key)
         return self._client
 
     async def summarize(
@@ -82,7 +96,7 @@ class ReviewSummarizer:
 
         log.info("summarizer.start", company=company_name, review_count=len(capped))
         try:
-            client = self._get_client()
+            client = await self._get_client()
             response = await client.chat.completions.create(
                 model=_MODEL,
                 max_tokens=_MAX_TOKENS,
