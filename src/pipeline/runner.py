@@ -23,6 +23,7 @@ from src.database.models import CompanyClean, CompanyEnriched, CompanyRaw, Revie
 from src.database.session import AsyncSessionLocal
 from src.deduplication.deduplicator import CanonicalCard, Deduplicator
 from src.enrichment.enricher import Enricher
+from src.proxy import proxy_manager
 
 log = structlog.get_logger(__name__)
 
@@ -45,6 +46,9 @@ class PipelineRunner:
     async def run(self) -> None:
         log.info("pipeline.start")
         start = datetime.now(UTC)
+
+        # Load sx.org RU proxy before collectors start
+        await proxy_manager.ensure_loaded()
 
         async with AsyncSessionLocal() as session:
             # ── Stage 1: Collect ─────────────────────────────────────────
