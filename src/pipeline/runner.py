@@ -87,7 +87,7 @@ class PipelineRunner:
             # Map raw_id → extra reviews found by ReviewSearcher (Flamp/VK/Otzovik)
             extra_reviews_map: dict[str, list[RawReview]] = {}
 
-            enrich_sem = asyncio.Semaphore(5)
+            enrich_sem = asyncio.Semaphore(settings.enrich_concurrency)
 
             async def _enrich_one(db_raw: CompanyRaw):
                 async with enrich_sem:
@@ -137,7 +137,7 @@ class PipelineRunner:
 
             # ── Stage 4 + 5: AI summarize, risk assess, write clean ──────
             log.info("pipeline.stage4.ai_and_write")
-            ai_sem = asyncio.Semaphore(5)
+            ai_sem = asyncio.Semaphore(settings.ai_concurrency)
 
             async def _process_card(card: CanonicalCard):
                 async with ai_sem:

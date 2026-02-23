@@ -57,14 +57,21 @@ class AbstractCollector(ABC):
         """Collect companies for a single keyword."""
 
     # Max concurrent keyword tasks per collector (override in subclass if needed)
-    _max_concurrent_keywords: int = 3
+    _max_concurrent_keywords: int = 0  # 0 = use config default
+    _uses_playwright: bool = False  # set True in Playwright-based collectors
 
     async def run(self, keywords: list[str] | None = None) -> list[RawCompany]:
         """Run collection for all keywords concurrently and return combined results."""
         from src.config import settings
 
         keywords = keywords or settings.search_keywords
-        sem = asyncio.Semaphore(self._max_concurrent_keywords)
+        if self._max_concurrent_keywords > 0:
+            concurrency = self._max_concurrent_keywords
+        elif self._uses_playwright:
+            concurrency = settings.playwright_max_keywords
+        else:
+            concurrency = settings.collector_max_keywords
+        sem = asyncio.Semaphore(concurrency)
 
         async def _collect_one(kw: str) -> list[RawCompany]:
             async with sem:
