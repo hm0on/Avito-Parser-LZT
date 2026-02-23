@@ -42,6 +42,12 @@ class Settings(BaseSettings):
     confidence_threshold: int = Field(default=70, alias="CONFIDENCE_THRESHOLD")
     max_reviews_per_company: int = Field(default=200, alias="MAX_REVIEWS_PER_COMPANY")
 
+    # Concurrency (pipeline parallelism)
+    enrich_concurrency: int = Field(default=5, alias="ENRICH_CONCURRENCY")
+    ai_concurrency: int = Field(default=5, alias="AI_CONCURRENCY")
+    collector_max_keywords: int = Field(default=3, alias="COLLECTOR_MAX_KEYWORDS")
+    playwright_max_keywords: int = Field(default=2, alias="PLAYWRIGHT_MAX_KEYWORDS")
+
     # Scheduler
     scheduler_cron: str = Field(default="0 3 * * 1", alias="SCHEDULER_CRON")
 

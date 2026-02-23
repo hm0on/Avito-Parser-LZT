@@ -28,7 +28,8 @@ class YandexCollector(AbstractCollector):
     _SCROLL_IDLE_SECONDS = 30.0
     _SCROLL_STEP_PAUSE_SECONDS = 0.8
     _SCROLL_MAX_SECONDS = 240.0
-    _max_concurrent_keywords = 2  # Playwright is heavy
+    _max_concurrent_keywords = 0  # from config
+    _uses_playwright = True
 
     async def collect(self, keyword: str) -> list[RawCompany]:
         urls = self._build_search_urls(keyword)

@@ -45,7 +45,8 @@ _REGION_LOCALITIES = [
 
 class TwoGisCollector(AbstractCollector):
     source_name = "2gis"
-    _max_concurrent_keywords = 2  # Playwright is heavy
+    _max_concurrent_keywords = 0  # from config
+    _uses_playwright = True
 
     # Class-level cache — key is extracted once and reused across keywords
     _api_key: str | None = None
