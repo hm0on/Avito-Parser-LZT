@@ -41,13 +41,16 @@ make up
 make migrate     # создать таблицы
 ```
 
-### 4. Тестовый прогон (6 компаний)
+`make up` и `make build` используют `docker-compose.yml + docker-compose.dev.yml` (локальная разработка с bind-mount/reload).
+Для сервера используйте только `docker-compose.yml` (см. `DEPLOY.md`).
+
+### 4. Тестовый прогон (30 компаний)
 
 ```bash
 python3 run_once.py
 ```
 
-Это запустит полный пайплайн (все 5 стадий) но ограничит выборку до 6 компаний (по 2 от каждого источника). Занимает ~7–15 минут.
+Это запустит полный пайплайн (все 5 стадий), но ограничит выборку до 30 компаний (~10 от каждого источника). Занимает ~7–15 минут.
 
 ### 5. Полный пайплайн
 
@@ -148,14 +151,15 @@ Stage 5: Write
 При первом запуске sx.org автоматически создаёт прокси-порты. В логах будет:
 
 ```
-sx_proxy.save_port_id  country=RU  port_id=12345  hint="Add SX_PROXY_PORT_ID_RU=12345 to .env"
+sx_proxy.save_port_id  country=RU  port_id=12345  hint="Add SX_PROXY_PORT_IDS_RU=12345,... to .env"
 sx_proxy.save_port_id  country=US  port_id=67890  hint="Add SX_PROXY_PORT_ID_US=67890 to .env"
 ```
 
 Сохраните эти ID в `.env` чтобы не пересоздавать порты при каждом запуске:
 
 ```env
-SX_PROXY_PORT_ID_RU=12345
+SX_PROXY_PORT_IDS_RU=12345,12346,12347
+SX_PROXY_RU_POOL_SIZE=3
 SX_PROXY_PORT_ID_US=67890
 ```
 

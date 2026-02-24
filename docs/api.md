@@ -14,6 +14,7 @@ Interactive docs: `http://localhost:8000/docs` (Swagger UI)
 
 | Parameter | Type | Description |
 |---|---|---|
+| region | string | Поиск по региону/городу в поле addresses |
 | risk | string | green / yellow / red |
 | min_rating | float | Минимальный средний рейтинг (0–5) |
 | service | string | Поиск по названию (ILIKE) |
@@ -130,7 +131,7 @@ Interactive docs: `http://localhost:8000/docs` (Swagger UI)
 
 ### Response
 
-- `Content-Type: text/csv` — CSV-файл с BOM
+- `Content-Type: text/csv` — CSV-файл
 - `Content-Type: application/json` — JSON-массив
 
 ### CSV columns

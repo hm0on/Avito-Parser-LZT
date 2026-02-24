@@ -20,7 +20,9 @@
 
 ```env
 SX_PROXY_API_KEY=...
-SX_PROXY_PORT_ID_RU=12345   # появится в логах при первом запуске
+SX_PROXY_PORT_ID_RU=12345   # один RU порт (обратная совместимость)
+SX_PROXY_PORT_IDS_RU=12345,12346,12347   # рекомендуемый пул RU портов
+SX_PROXY_RU_POOL_SIZE=3
 SX_PROXY_PORT_ID_US=67890   # появится в логах при первом запуске
 ```
 
@@ -144,4 +146,6 @@ host3:port
 | `AVITO_COOKIES_API_KEY` | Рекомендуется | ~12₽/набор | Обход антибота Авито |
 | `SERPAPI_KEY` | Нет | 100 бесплатно | Поиск отзывов (fallback) |
 | `SX_PROXY_PORT_ID_RU` | Нет | — | Кеш порта (auto) |
+| `SX_PROXY_PORT_IDS_RU` | Нет | — | Кеш пула RU-портов (auto) |
+| `SX_PROXY_RU_POOL_SIZE` | Нет | — | Размер пула RU-прокси в памяти |
 | `SX_PROXY_PORT_ID_US` | Нет | — | Кеш порта (auto) |

@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -26,7 +27,7 @@ async def run_pipeline_job() -> None:
 
 
 async def main() -> None:
-    scheduler = AsyncIOScheduler()
+    scheduler = AsyncIOScheduler(timezone=ZoneInfo("UTC"))
 
     # Parse cron from settings (format: "minute hour day month day_of_week")
     cron_parts = settings.scheduler_cron.split()

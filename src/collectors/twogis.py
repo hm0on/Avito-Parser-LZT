@@ -349,6 +349,7 @@ class TwoGisCollector(AbstractCollector):
                 slow_mo=300 if settings.twogis_debug_browser else 0,
                 args=["--no-sandbox", "--disable-dev-shm-usage"],
             )
+            context = None
             try:
                 context = await browser.new_context(
                     user_agent=(
@@ -372,7 +373,8 @@ class TwoGisCollector(AbstractCollector):
                 await asyncio.gather(*[_job(url) for url in pending_urls])
                 pending_urls = next_pending
             finally:
-                await context.close()
+                if context:
+                    await context.close()
                 await browser.close()
 
             if pending_urls and attempt < total_attempts:
@@ -626,7 +628,7 @@ class TwoGisCollector(AbstractCollector):
     async def _fetch_items(self, keyword: str, api_key: str) -> list[RawCompany]:
         proxy_url = proxy_manager.get_next()
         if proxy_url:
-            log.debug("twogis.catalog.proxy_pick", proxy=proxy_url)
+            log.debug("twogis.catalog.proxy_pick", proxy=_proxy_log_hint(proxy_url))
         async with httpx.AsyncClient(timeout=30.0, proxy=proxy_url or None) as client:
             params = {
                 "q": keyword,
@@ -795,6 +797,15 @@ def _is_forbidden_html(html: str) -> bool:
         or "support team" in low
         or "copy the report" in low
     )
+
+
+def _proxy_log_hint(proxy_url: str) -> str:
+    parsed = urlparse(proxy_url)
+    if not parsed.hostname:
+        return "unknown"
+    if parsed.port:
+        return f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"
+    return f"{parsed.scheme}://{parsed.hostname}"
 
 
 async def _detect_max_search_page(page) -> int:

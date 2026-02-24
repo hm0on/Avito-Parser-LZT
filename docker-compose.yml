@@ -9,8 +9,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-avito_parser}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
+    restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-avito}"]
       interval: 10s
@@ -28,22 +27,20 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    command: uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
-    volumes:
-      - .:/app
+    command: uvicorn src.api.main:app --host 0.0.0.0 --port 8000
+    restart: unless-stopped
 
   scheduler:
     build:
       context: .
       dockerfile: Dockerfile
-      target: base
+      target: collector
     env_file: .env
     depends_on:
       db:
         condition: service_healthy
     command: python scheduler/scheduler.py
-    volumes:
-      - .:/app
+    restart: unless-stopped
 
   collector:
     build:
@@ -55,8 +52,6 @@ services:
       db:
         condition: service_healthy
     command: python -m src.pipeline.runner
-    volumes:
-      - .:/app
     profiles:
       - manual
 

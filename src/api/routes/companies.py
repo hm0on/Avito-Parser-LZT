@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import String, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.schemas import CompanyDetail, CompanyListItem, ManualReviewPayload, PaginatedCompanies
@@ -30,6 +30,8 @@ async def list_companies(
 
     if risk:
         stmt = stmt.where(CompanyClean.risk_level == risk)
+    if region:
+        stmt = stmt.where(cast(CompanyClean.addresses, String).ilike(f"%{region}%"))
     if min_rating is not None:
         stmt = stmt.where(CompanyClean.average_rating >= min_rating)
     if service:

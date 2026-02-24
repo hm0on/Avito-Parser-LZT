@@ -28,7 +28,10 @@ from src.proxy import proxy_manager
 log = structlog.get_logger(__name__)
 
 AVITO_BASE = "https://www.avito.ru"
-AVITO_SEARCH = f"{AVITO_BASE}/omsk/predlozheniya_uslug"
+AVITO_SEARCH = f"{AVITO_BASE}/omsk/uslugi"
+_AVITO_SEARCH_FALLBACKS = (
+    f"{AVITO_BASE}/omsk/predlozheniya_uslug",
+)
 
 _HEADERS = {
     "User-Agent": (
@@ -116,18 +119,24 @@ class _SpfaCookiesProvider:
         """Request cookie unblock via spfa.ru/api/unblock/.
 
         Per docs: unblock is async (~5 sec), up to 12 req/min.
-        After unblock we re-fetch cookies via /api/cookies/ to get refreshed set.
+        We do not sleep here: cookie refresh happens on subsequent retries.
         """
         if not self._id:
             self._buy()
             return
         import requests
 
-        # Throttle: don't spam unblock (max 12/min per docs)
+        # Non-blocking flow:
+        # 1) send unblock request and store timestamp,
+        # 2) on next call (after retry wait), refresh cookies.
         now = time.time()
-        if self._unblock_started_at and now - self._unblock_started_at < 10:
-            log.info("avito.cookies.waiting_unblock",
-                     elapsed=round(now - self._unblock_started_at, 1))
+        if self._unblock_started_at:
+            elapsed = now - self._unblock_started_at
+            if elapsed < 6:
+                log.info("avito.cookies.waiting_unblock", elapsed=round(elapsed, 1))
+                return
+            self._refresh_cookies()
+            self._unblock_started_at = None
             return
 
         try:
@@ -141,17 +150,11 @@ class _SpfaCookiesProvider:
 
             if r.status_code in (200, 202):
                 self._unblock_started_at = now
-                # Unblock is async — wait for it to complete (~5 sec per docs)
-                time.sleep(6)
-                # Re-fetch updated cookies
-                self._refresh_cookies()
                 return
 
             if r.status_code == 409:
-                # Already unblocking — wait and refresh
+                # Already unblocking — refresh will happen on next retry call.
                 self._unblock_started_at = self._unblock_started_at or now
-                time.sleep(6)
-                self._refresh_cookies()
                 return
 
         except Exception as exc:
@@ -239,6 +242,11 @@ class AvitoCollector(AbstractCollector):
 
     def __init__(self) -> None:
         self._cookies_provider = _build_cookies_provider()
+
+    async def _handle_block(self) -> None:
+        """Run potentially blocking cookie refresh in a worker thread."""
+        if self._cookies_provider:
+            await asyncio.to_thread(self._cookies_provider.handle_block)
 
     async def enrich_phones(self, companies: list[RawCompany]) -> None:
         """Phone enrichment via spfa.ru API — disabled to save costs.
@@ -383,8 +391,18 @@ class AvitoCollector(AbstractCollector):
                         if resp.status_code == 429:
                             wait = 5 * attempt
                             log.debug("avito.reviews.rate_limit", wait=wait, attempt=attempt)
-                            if self._cookies_provider:
-                                self._cookies_provider.handle_block()
+                            await self._handle_block()
+                            rotated = await proxy_manager.rotate_sx_ru()
+                            log.info("avito.reviews.proxy_rotated", rotated=bool(rotated))
+                            await asyncio.sleep(wait)
+                            continue
+
+                        if resp.status_code == 403:
+                            wait = 3 * attempt
+                            log.debug("avito.reviews.forbidden", wait=wait, attempt=attempt)
+                            await self._handle_block()
+                            rotated = await proxy_manager.rotate_sx_ru()
+                            log.info("avito.reviews.proxy_rotated", rotated=bool(rotated))
                             await asyncio.sleep(wait)
                             continue
 
@@ -400,38 +418,53 @@ class AvitoCollector(AbstractCollector):
         return []
 
     async def collect(self, keyword: str) -> list[RawCompany]:
-        url = f"{AVITO_SEARCH}?q={quote_plus(keyword)}"
-        log.info("avito.collect.start", keyword=keyword, url=url)
+        search_entries = list(dict.fromkeys([AVITO_SEARCH, *_AVITO_SEARCH_FALLBACKS]))
+        log.info("avito.collect.start", keyword=keyword, entries=search_entries)
 
-        companies: list[RawCompany] = []
+        for entry_url in search_entries:
+            url = f"{entry_url}?q={quote_plus(keyword)}"
+            companies: list[RawCompany] = []
+            first_page_loaded = False
 
-        for page in range(1, 6):  # max 5 pages × 50 items = 250
-            page_url = f"{url}&p={page}" if page > 1 else url
-            html_text = await self._fetch(page_url)
+            for page in range(1, 6):  # max 5 pages × 50 items = 250
+                page_url = f"{url}&p={page}" if page > 1 else url
+                html_text = await self._fetch(page_url)
 
-            if not html_text:
-                break
+                if not html_text:
+                    # Usually means bad route/proxy/network on page 1.
+                    if page == 1:
+                        log.warning("avito.collect.entry_unreachable", keyword=keyword, entry=entry_url)
+                    break
 
-            if _is_blocked(html_text):
-                log.warning("avito.collect.blocked", page=page, keyword=keyword)
-                if self._cookies_provider:
-                    self._cookies_provider.handle_block()
-                break
+                first_page_loaded = True
 
-            page_companies = _parse_html(html_text, keyword)
-            if not page_companies:
-                log.info("avito.collect.empty_page", page=page, keyword=keyword)
-                break
+                if _is_blocked(html_text):
+                    log.warning("avito.collect.blocked", page=page, keyword=keyword, entry=entry_url)
+                    await self._handle_block()
+                    break
 
-            companies.extend(page_companies)
-            log.info(
-                "avito.collect.page_done",
-                page=page, found=len(page_companies), total=len(companies), keyword=keyword,
-            )
-            await asyncio.sleep(1.5)
+                page_companies = _parse_html(html_text, keyword)
+                if not page_companies:
+                    log.info("avito.collect.empty_page", page=page, keyword=keyword, entry=entry_url)
+                    break
 
-        log.info("avito.collect.done", keyword=keyword, count=len(companies))
-        return companies
+                companies.extend(page_companies)
+                log.info(
+                    "avito.collect.page_done",
+                    page=page,
+                    found=len(page_companies),
+                    total=len(companies),
+                    keyword=keyword,
+                    entry=entry_url,
+                )
+                await asyncio.sleep(1.5)
+
+            if first_page_loaded:
+                log.info("avito.collect.done", keyword=keyword, count=len(companies), entry=entry_url)
+                return companies
+
+        log.warning("avito.collect.all_entries_failed", keyword=keyword, entries=len(search_entries))
+        return []
 
     async def _fetch(self, url: str) -> str | None:
         """Fetch with up to 3 retries; on 429 renews cookies and waits before retry."""
@@ -453,16 +486,20 @@ class AvitoCollector(AbstractCollector):
                         wait = 5 * attempt
                         log.warning("avito.fetch.rate_limited",
                                     attempt=attempt, wait_s=wait, url=url)
-                        if self._cookies_provider:
-                            self._cookies_provider.handle_block()
+                        await self._handle_block()
+                        rotated = await proxy_manager.rotate_sx_ru()
+                        log.info("avito.fetch.proxy_rotated", rotated=bool(rotated), reason="429")
                         await asyncio.sleep(wait)
                         continue
 
                     if resp.status_code == 403:
-                        log.warning("avito.fetch.forbidden", url=url)
-                        if self._cookies_provider:
-                            self._cookies_provider.handle_block()
-                        return None
+                        wait = 3 * attempt
+                        log.warning("avito.fetch.forbidden", url=url, wait_s=wait)
+                        await self._handle_block()
+                        rotated = await proxy_manager.rotate_sx_ru()
+                        log.info("avito.fetch.proxy_rotated", rotated=bool(rotated), reason="403")
+                        await asyncio.sleep(wait)
+                        continue
 
                     resp.raise_for_status()
                     return resp.text

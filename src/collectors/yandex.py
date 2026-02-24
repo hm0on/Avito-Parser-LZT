@@ -101,6 +101,16 @@ class YandexCollector(AbstractCollector):
                         raise
                 except Exception as exc:
                     last_exc = exc
+                    is_tunnel_err = use_proxy and _is_proxy_tunnel_error(exc)
+                    if is_tunnel_err:
+                        rotated = await proxy_manager.rotate_sx_ru()
+                        log.warning(
+                            "yandex.collect.proxy_tunnel_error",
+                            attempt=attempt,
+                            attempts=attempts,
+                            url=url,
+                            rotated=bool(rotated),
+                        )
                     log.warning(
                         "yandex.collect.attempt_error",
                         attempt=attempt,
@@ -653,3 +663,12 @@ class YandexCollector(AbstractCollector):
 
 def _exc_detail(exc: Exception) -> str:
     return str(exc)
+
+
+def _is_proxy_tunnel_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return (
+        "err_tunnel_connection_failed" in msg
+        or "proxy connection failed" in msg
+        or "proxyconnect tcp" in msg
+    )

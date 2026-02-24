@@ -26,7 +26,11 @@ class Settings(BaseSettings):
     # SX.org proxy (RU для скрапинга, US для OpenAI API)
     sx_proxy_api_key: str = Field(default="", alias="SX_PROXY_API_KEY")
     sx_proxy_port_id_ru: int = Field(default=0, alias="SX_PROXY_PORT_ID_RU")
+    # Optional comma-separated list of pre-created RU port IDs (e.g. "123,124,125")
+    sx_proxy_port_ids_ru: str = Field(default="", alias="SX_PROXY_PORT_IDS_RU")
     sx_proxy_port_id_us: int = Field(default=0, alias="SX_PROXY_PORT_ID_US")
+    # Number of RU SX proxies to keep in memory for round-robin rotation
+    sx_proxy_ru_pool_size: int = Field(default=3, alias="SX_PROXY_RU_POOL_SIZE")
     # Safety: forbid автоматические покупки портов на проде
     sx_proxy_allow_create: bool = Field(default=False, alias="SX_PROXY_ALLOW_CREATE")
 

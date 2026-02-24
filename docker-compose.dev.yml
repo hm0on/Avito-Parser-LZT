@@ -1,0 +1,17 @@
+services:
+  db:
+    ports:
+      - "5432:5432"
+
+  api:
+    command: uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - .:/app
+
+  scheduler:
+    volumes:
+      - .:/app
+
+  collector:
+    volumes:
+      - .:/app

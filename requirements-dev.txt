@@ -6,3 +6,7 @@ pytest-asyncio==0.24.0
 pytest-httpserver==1.1.0
 pytest-mock==3.14.0
 respx==0.22.0
+
+# Linting / typing
+ruff==0.8.4
+mypy==1.13.0

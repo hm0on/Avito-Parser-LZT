@@ -55,20 +55,20 @@ nano .env  # заполнить API-ключи
 cd /opt/avito_parser
 
 # Собрать все образы
-docker compose build
+docker compose -f docker-compose.yml build
 
 # Запустить БД, дождаться ready
-docker compose up -d db
+docker compose -f docker-compose.yml up -d db
 sleep 5
 
 # Применить миграции
-docker compose run --rm api alembic upgrade head
+docker compose -f docker-compose.yml run --rm api alembic upgrade head
 
 # Запустить API + планировщик
-docker compose up -d api scheduler
+docker compose -f docker-compose.yml up -d api scheduler
 
 # Проверить что всё работает
-docker compose ps
+docker compose -f docker-compose.yml ps
 curl localhost:8000/companies
 ```
 
@@ -78,7 +78,7 @@ curl localhost:8000/companies
 cd /opt/avito_parser
 
 # Ручной запуск полного пайплайна (сбор → обогащение → дедупликация → AI → экспорт)
-docker compose run --rm collector python -m src.pipeline.runner
+docker compose -f docker-compose.yml run --rm collector python -m src.pipeline.runner
 ```
 
 Планировщик автоматически запускает пайплайн по крону (по умолчанию: каждый понедельник в 03:00).
@@ -87,15 +87,15 @@ docker compose run --rm collector python -m src.pipeline.runner
 
 ```bash
 # Логи в реальном времени
-docker compose logs -f api
-docker compose logs -f scheduler
-docker compose logs -f collector   # во время ручного запуска
+docker compose -f docker-compose.yml logs -f api
+docker compose -f docker-compose.yml logs -f scheduler
+docker compose -f docker-compose.yml logs -f collector   # во время ручного запуска
 
 # Статус контейнеров
-docker compose ps
+docker compose -f docker-compose.yml ps
 
 # Подключиться к БД
-docker compose exec db psql -U avito -d avito_parser
+docker compose -f docker-compose.yml exec db psql -U avito -d avito_parser
 ```
 
 ## 7. Экспорт данных
@@ -124,10 +124,10 @@ rsync -avz --exclude='.git' --exclude='__pycache__' --exclude='.venv' --exclude=
 
 ```bash
 cd /opt/avito_parser
-docker compose build             # пересобрать образы
-docker compose up -d api scheduler  # перезапустить сервисы
+docker compose -f docker-compose.yml build             # пересобрать образы
+docker compose -f docker-compose.yml up -d api scheduler  # перезапустить сервисы
 # Если изменились миграции:
-docker compose run --rm api alembic upgrade head
+docker compose -f docker-compose.yml run --rm api alembic upgrade head
 ```
 
 ## 9. Настройка производительности
@@ -166,11 +166,16 @@ PLAYWRIGHT_MAX_KEYWORDS=4
 cd /opt/avito_parser
 
 # Остановить всё
-docker compose down
+docker compose -f docker-compose.yml down
 
 # Остановить с удалением данных БД
-docker compose down -v
+docker compose -f docker-compose.yml down -v
 ```
+
+## Dev/Prod compose
+
+- `docker-compose.yml` — production-конфигурация (без bind-mount и без `--reload`)
+- `docker-compose.dev.yml` — только для локальной разработки (используется `make up`)
 
 ## Решение проблем
 

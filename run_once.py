@@ -15,7 +15,7 @@ import structlog
 
 from src.pipeline.runner import PipelineRunner
 
-_COMPANY_LIMIT = 30  # 2 per source (avito, 2gis, yandex)
+_COMPANY_LIMIT = 30  # ~10 per source (avito, 2gis, yandex)
 
 # Show all pipeline logs (including debug for review diagnostics)
 structlog.configure(
