@@ -1,0 +1,10 @@
+# Proxy list template — one proxy per line.
+# Supported formats:
+#   http://user:pass@host:port
+#   socks5://user:pass@host:port
+#   host:port
+#
+# Keep real proxy credentials in an ignored local file (for example
+# storage/proxies/avito.txt), never in Git.
+
+http://user:password@proxy.example:8080

@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head><meta charset="UTF-8"><title>ООО БурПро — Бурение скважин Омск — Авито</title></head>
+<body>
+
+<h1>ООО БурПро — Бурение скважин Омск</h1>
+
+<!-- Phone reveal pattern: button click → hidden span becomes visible -->
+<button data-marker="phone-button"
+        onclick="document.getElementById('phone-reveal').removeAttribute('hidden')">
+  Показать телефон
+</button>
+<span id="phone-reveal" data-marker="phone-number" hidden>+7 (913) 123-45-67</span>
+
+<!-- Email (rarely shown on Avito, but supported) -->
+<a href="mailto:burpro@example.com">burpro@example.com</a>
+
+<!-- Address -->
+<span data-marker="item-address">Омск, ул. Тарская, 12</span>
+
+<!-- Reviews -->
+<div data-marker="review-item">
+  <span data-marker="review-text">Отличная работа, рекомендую! Пробурили скважину быстро и качественно.</span>
+  <span data-marker="review-rating">5</span>
+  <span data-marker="review-author">Иван Иванов</span>
+</div>
+
+<div data-marker="review-item">
+  <span data-marker="review-text">Работа выполнена в срок, качество хорошее. Цена соответствует рынку.</span>
+  <span data-marker="review-rating">4</span>
+  <span data-marker="review-author">Мария Петрова</span>
+</div>
+
+</body>
+</html>

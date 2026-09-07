@@ -1,0 +1,15 @@
+.git
+.github
+.venv
+__pycache__
+*.pyc
+.mypy_cache
+.pytest_cache
+.ruff_cache
+.claude
+*.egg-info
+node_modules
+tests/andrey/artifacts
+storage/run_once_bg.err.log
+storage/*.png
+README.md

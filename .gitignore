@@ -1,0 +1,30 @@
+# Environment
+.env
+
+# Proxies (contain credentials)
+proxies.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Docker volumes
+postgres_data/
+
+# Exports
+*.csv
+*.json
+*.dump
+*.sql
+server_db_export/
+
+# Local/debug artifacts
+.DS_Store
+tests/andrey/
+
+# Runtime artifacts
+storage/
+*.log
